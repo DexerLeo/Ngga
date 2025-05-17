@@ -8,7 +8,8 @@
   },
   "dependencies": {
     "discord.js": "^14.11.0",
-    "fuse.js": "^6.6.2"
+    "fuse.js": "^6.6.2",
+    "dotenv": "^16.0.0"
   },
   "engines": {
     "node": ">=16.9.0"
