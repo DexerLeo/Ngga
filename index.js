@@ -1,13 +1,10 @@
+const normalizer = require('./fontNormalizer');
 require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, REST, Routes, SlashCommandBuilder } = require("discord.js");
 const fs = require("fs");
 const Fuse = require("fuse.js");
 
 const TOKEN = process.env.TOKEN;
-const LOADING_EMOJI = "<a:loading:1373152608759582771>";
-const CHECK_EMOJI = "✅";
-const NO_RESULT_EMOJI = "🔴";
-
 const JSON_FILE = "./DBTag.json";
 
 const client = new Client({
@@ -18,28 +15,31 @@ const client = new Client({
   ],
 });
 
+client.once("ready", () => {
+  if (client.user) {
+    console.log(`online as ${client.user.tag}`);
+  } else {
+    console.log("online as (unknown bot user)");
+  }
+});
+
 const rest = new REST({ version: "10" }).setToken(TOKEN);
 (async () => {
   try {
-    await rest.put(
-      Routes.applicationCommands(client.user?.id || "YOUR_CLIENT_ID"),
-      {
-        body: [
-          new SlashCommandBuilder()
-            .setName("addtag")
-            .setDescription("Add a new tag with name and url")
-            .addStringOption(option =>
-              option.setName("input")
-                .setDescription("Format: Tag_name, Tag_url")
-                .setRequired(true)
-            )
-            .toJSON(),
-        ],
-      }
-    );
-  } catch (error) {
-    console.error(error);
-  }
+    await rest.put(Routes.applicationCommands(client.user?.id || "me"), {
+      body: [
+        new SlashCommandBuilder()
+          .setName("addtag")
+          .setDescription("Add a new tag with name and url")
+          .addStringOption(option =>
+            option.setName("input")
+              .setDescription("Format: Tag_name, Tag_url")
+              .setRequired(true)
+          )
+          .toJSON(),
+      ],
+    });
+  } catch {}
 })();
 
 function loadTags() {
@@ -53,7 +53,7 @@ function loadTags() {
 
 function saveTags(tags) {
   try {
-    fs.writeFileSync(JSON_FILE, JSON.stringify(tags, null, 2));
+    fs.writeFileSync(JSON_FILE, JSON.stringify(tags));
     return true;
   } catch {
     return false;
@@ -86,10 +86,6 @@ function buildEmbed(title, description, color) {
 function buildTagDescription(tags, startIndex = 1) {
   return tags.map((t, i) => `${i + startIndex}. **${t.name}**\n${t.link}`).join("\n\n");
 }
-
-client.on("ready", () => {
-  console.log(`Logged in as ${client.user.tag}`);
-});
 
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
@@ -128,6 +124,7 @@ client.on("messageCreate", async (message) => {
   const command = args[1]?.toLowerCase() || "";
   const language = args[2]?.toLowerCase() || "";
 
+  // --- Unicode Search Section (Show Chinese/Korean/Japanese) ---
   if (command === "show" && ["chinese", "korean", "japanese"].includes(language)) {
     const allTags = loadTags();
     const langTags = allTags.filter(tag => {
@@ -138,92 +135,108 @@ client.on("messageCreate", async (message) => {
       return false;
     });
 
-    if (langTags.length === 0) {
-      const noResultEmbed = buildEmbed(
-        `${NO_RESULT_EMOJI} No ${language.charAt(0).toUpperCase() + language.slice(1)} Tags Found`,
-        `Sorry, no tags found for ${language}.`,
-        0xff0000
-      );
-      await message.channel.send({ embeds: [noResultEmbed] });
-      return;
-    }
+    if (langTags.length === 0) {  
+      const noResultEmbed = buildEmbed(  
+        `🔴 No ${language.charAt(0).toUpperCase() + language.slice(1)} Tags Found`,  
+        `Sorry, no tags found for ${language}.`,  
+        0xff0000  
+      );  
+      await message.channel.send({ embeds: [noResultEmbed] });  
+      return;  
+    }  
 
-    let currentIndex = 0;
+    const pageSize = 5;
+    let page = 0;
+    const totalPages = Math.ceil(langTags.length / pageSize);
 
-    async function buildTagList(start) {
-      const chunk = langTags.slice(start, start + 5);
+    async function buildTagList(page) {
+      const chunk = langTags.slice(page * pageSize, page * pageSize + pageSize);
       return chunk.map(t => `${t.name}\n${t.link}`).join("\n\n");
     }
 
-    const initialDesc = await buildTagList(currentIndex);
-    currentIndex += 5;
-
-    const embed = buildEmbed(
-      `${CHECK_EMOJI} Showing ${language.charAt(0).toUpperCase() + language.slice(1)} Tags`,
-      initialDesc,
+    // Initial Loading Embed
+    const loadingEmbed = buildEmbed(
+      `<a:loading:1373152608759582771> Loading...`,
+      `Fetching tags..`,
       getRandomColor()
     );
+    const sent = await message.channel.send({ embeds: [loadingEmbed] });
 
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("unicode_retry_0")
-        .setLabel("Retry")
-        .setStyle(ButtonStyle.Primary)
-    );
-
-    const sent = await message.channel.send({ embeds: [embed], components: [row] });
-
-    const filter = (interaction) =>
-      interaction.customId.startsWith("unicode_retry_") &&
-      interaction.message.id === sent.id &&
-      interaction.user.id === message.author.id;
-
-    const collector = sent.createMessageComponentCollector({ filter, time: 180000 });
-
-    collector.on("collect", async (interaction) => {
-      const loadingEmbed = buildEmbed(`${LOADING_EMOJI} Loading...`, `Fetching more ${language} tags...`, getRandomColor());
-      await interaction.update({ embeds: [loadingEmbed], components: [] });
-
-      await new Promise(r => setTimeout(r, 2000));
-
-      const nextDesc = await buildTagList(currentIndex);
-      currentIndex += 5;
-
-      const newEmbed = buildEmbed(
-        `${CHECK_EMOJI} Showing ${language.charAt(0).toUpperCase() + language.slice(1)} Tags (Page)`,
-        nextDesc,
+    setTimeout(async () => {
+      const initialDesc = await buildTagList(page);
+      const embed = buildEmbed(
+        `✅ Showing ${language.charAt(0).toUpperCase() + language.slice(1)} Tags (Page ${page + 1}/${totalPages})`,
+        initialDesc,
         getRandomColor()
       );
 
-      const components = [
-        new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId(`unicode_retry_${Date.now()}`)
-            .setLabel("Retry")
-            .setStyle(ButtonStyle.Primary)
-        )
-      ];
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("unicode_prev")
+          .setLabel("⬅️")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(true),
+        new ButtonBuilder()
+          .setCustomId("unicode_next")
+          .setLabel("➡️")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(totalPages <= 1)
+      );
+      await sent.edit({ embeds: [embed], components: [row] });
 
-      await interaction.editReply({ embeds: [newEmbed], components });
-    });
+      const filter = (interaction) =>
+        (interaction.customId === "unicode_prev" || interaction.customId === "unicode_next") &&
+        interaction.message.id === sent.id &&
+        interaction.user.id === message.author.id;
+
+      const collector = sent.createMessageComponentCollector({ filter, time: 180000 });
+
+      collector.on("collect", async (interaction) => {
+        if (interaction.customId === "unicode_prev" && page > 0) {
+          page--;
+        } else if (interaction.customId === "unicode_next" && page < totalPages - 1) {
+          page++;
+        }
+        const desc = await buildTagList(page);
+        const embedUpdated = buildEmbed(
+          `✅ Showing ${language.charAt(0).toUpperCase() + language.slice(1)} Tags (Page ${page + 1}/${totalPages})`,
+          desc,
+          getRandomColor()
+        );
+        const rowUpdated = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId("unicode_prev")
+            .setLabel("⬅️")
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(page === 0),
+          new ButtonBuilder()
+            .setCustomId("unicode_next")
+            .setLabel("➡️")
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(page >= totalPages - 1)
+        );
+        await interaction.update({ embeds: [embedUpdated], components: [rowUpdated] });
+      });
+
+    }, 2000);
 
     return;
   }
 
+  // --- Fuzzy (Regular) Search Section ---
   const tagQuery = args[args.length - 1];
-
   const loadingSteps = [
     "Processing Request",
     "Generating Job Application",
     "Finalizing Query",
   ];
 
-  let loadingEmbed = buildEmbed(`${LOADING_EMOJI} Starting...`, `Searching for tag: ${tagQuery}`, getRandomColor());
+  let loadingEmbed = buildEmbed(`<a:loading:1373152608759582771> Starting...`, `Searching for tag: ${tagQuery}`, 0x808080);
   const sent = await message.channel.send({ embeds: [loadingEmbed] });
 
   for (let i = 0; i < loadingSteps.length; i++) {
     await new Promise(r => setTimeout(r, 1700));
-    loadingEmbed = buildEmbed(`${LOADING_EMOJI} ${loadingSteps[i]}`, `Searching for tag: ${tagQuery}`, getRandomColor());
+    loadingEmbed = buildEmbed(`<a:loading:1373152608759582771> ${loadingSteps[i]}`, `Searching for tag: ${tagQuery}`, 0x808080);
     await sent.edit({ embeds: [loadingEmbed] });
   }
 
@@ -232,70 +245,76 @@ client.on("messageCreate", async (message) => {
     const results = searchTags(tagQuery, allTags);
     const exactMatch = results.find(t => t.name.toLowerCase() === tagQuery.toLowerCase());
 
-    if (exactMatch) {
-      const embed = buildEmbed(exactMatch.name, exactMatch.link, getRandomColor());
+    if (exactMatch) {  
+      const embed = buildEmbed(exactMatch.name, exactMatch.link, 0x32cd32);
       await sent.edit({ embeds: [embed], components: [] });
-    } else if (results.length > 0) {
-      const desc = buildTagDescription(results.slice(0, 5));
-      const embed = buildEmbed(`Found ${results.length} tags`, desc, getRandomColor());
+    } else if (results.length > 0) {  
+      let page = 0;
+      const pageSize = 3;
+      const totalPages = Math.ceil(results.length / pageSize);
+
+      let desc = buildTagDescription(results.slice(page * pageSize, (page + 1) * pageSize));
+      let embed = buildEmbed(`✅ Found ${results.length} Tags (Page ${page + 1}/${totalPages})`, desc, 0x32cd32);
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
-          .setCustomId("retry_0")
-          .setLabel("Retry")
-          .setStyle(ButtonStyle.Primary)
+          .setCustomId("fuzzy_prev")
+          .setLabel("⬅️")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(true),
+        new ButtonBuilder()
+          .setCustomId("fuzzy_next")
+          .setLabel("➡️")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(totalPages <= 1)
       );
 
       await sent.edit({ embeds: [embed], components: [row] });
 
-      let retryCount = 0;
-      let currentIndex = 5;
-
       const filter = (interaction) =>
-        interaction.customId.startsWith("retry_") &&
+        (interaction.customId === "fuzzy_prev" || interaction.customId === "fuzzy_next") &&
         interaction.message.id === sent.id &&
         interaction.user.id === message.author.id;
 
       const collector = sent.createMessageComponentCollector({ filter, time: 180000 });
 
       collector.on("collect", async (interaction) => {
-        retryCount++;
-        const loadingEmbed = buildEmbed(`${LOADING_EMOJI} Loading...`, `Fetching more tags...`, getRandomColor());
-        await interaction.update({ embeds: [loadingEmbed], components: [] });
-
-        await new Promise(r => setTimeout(r, 2000));
-
-        const nextChunk = results.slice(currentIndex, currentIndex + 5);
-        if (nextChunk.length === 0) {
-          await interaction.editReply({ content: "No more tags found.", embeds: [], components: [] });
-          collector.stop();
-          return;
+        if (interaction.customId === "fuzzy_prev" && page > 0) {
+          page--;
+        } else if (interaction.customId === "fuzzy_next" && page < totalPages - 1) {
+          page++;
         }
-
-        const desc = buildTagDescription(nextChunk, currentIndex + 1);
-        currentIndex += 5;
-
-        const newEmbed = buildEmbed(`Found ${results.length} tags (Page ${retryCount + 1})`, desc, getRandomColor());
-
-        const components = [
-          new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-              .setCustomId(`retry_${retryCount}`)
-              .setLabel("Retry")
-              .setStyle(ButtonStyle.Primary)
-          )
-        ];
-
-        await interaction.editReply({ embeds: [newEmbed], components });
+        desc = buildTagDescription(results.slice(page * pageSize, (page + 1) * pageSize));
+        embed = buildEmbed(`✅ Found ${results.length} Tags (Page ${page + 1}/${totalPages})`, desc, 0x32cd32);
+        const rowUpdated = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId("fuzzy_prev")
+            .setLabel("⬅️")
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(page === 0),
+          new ButtonBuilder()
+            .setCustomId("fuzzy_next")
+            .setLabel("➡️")
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(page >= totalPages - 1)
+        );
+        await interaction.update({ embeds: [embed], components: [rowUpdated] });
       });
-    } else {
+    } else {  
+      let noResultMsg = "";
+      if (tagQuery.length > 4) {
+        noResultMsg = "No Match Found, Try 4 Letters";
+      } else {
+        noResultMsg = "No Match Found, Be More Specific";
+      }
       const noResultEmbed = buildEmbed(
-        `${NO_RESULT_EMOJI} No Results`,
-        `No tags found matching "${tagQuery}".`,
+        `🔴 No Results`,
+        noResultMsg,
         0xff0000
       );
       await sent.edit({ embeds: [noResultEmbed], components: [] });
     }
+
   } catch {
     const errorEmbed = buildEmbed(
       "Error",
@@ -307,4 +326,3 @@ client.on("messageCreate", async (message) => {
 });
 
 client.login(TOKEN);
-
