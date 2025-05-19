@@ -7,6 +7,9 @@ const Fuse = require("fuse.js");
 const TOKEN = process.env.TOKEN;
 const JSON_FILE = "./DBTag.json";
 
+// Role ID allowed to use the addtag command
+const ALLOWED_ROLE_ID = "1373976275953385513";
+
 const SYMBOLS = [
   "<3",
   ":3",
@@ -141,10 +144,25 @@ client.on("messageCreate", async (message) => {
   const command = args[1]?.toLowerCase() || "";
   const language = args[2]?.toLowerCase() || "";
 
-  // --- ADD TAG (Text Command) ---
+  // --- ADD TAG (Text Command, role-restricted) ---
   // Example: @Bot addtag rex, https://discord.gg/123
   //          @Bot at rex, https://discord.gg/123
   if (command === "addtag" || command === "at") {
+    // Check if user has the allowed role (ALLOWED_ROLE_ID)
+    const member = message.member;
+    if (!member || !member.roles.cache.has(ALLOWED_ROLE_ID)) {
+      await message.channel.send({
+        embeds: [
+          buildEmbed(
+            "❌ Permission Denied",
+            "You do not have permission to use this command.",
+            0xff0000
+          ),
+        ],
+      });
+      return;
+    }
+
     // Combine all args after the command into one string and split by first comma
     const addTagRaw = message.content
       .slice(message.content.indexOf(command) + command.length)
