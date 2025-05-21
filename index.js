@@ -132,6 +132,56 @@ client.on("guildCreate", async (guild) => {
 });
 // ------------------------------
 
+// --- !help Command Handler ---
+client.on("messageCreate", async (message) => {
+  if (
+    message.author.bot ||
+    typeof message.content !== "string" ||
+    message.content.trim().toLowerCase() !== "!help"
+  ) return;
+
+  // Attempt to delete the user's help message
+  if (message.deletable) {
+    try { await message.delete(); } catch (e) {}
+  }
+
+  // Build help embed
+  const helpEmbed = new EmbedBuilder()
+    .setTitle("**Commands**")
+    .setDescription(
+      `@Bot addtag\nor \n@Bot at\n\n` +
+      `**Use:** @Bot addtag name, url\n` +
+      `**Who:** Only users with BACKEND ACCESS role\n` +
+      `**What:** Adds a tag to the database\n\n` +
+
+      `@Bot Show Japanese/Chinese/Korean\n\n` +
+      `**Use:** @Bot show chinese/korean/japanese\n` +
+      `**Who:** Anyone\n` +
+      `**What:** Shows tags with Chinese, Korean, or Japanese text\n\n` +
+
+      `@Bot show symbols\n\n` +
+      `**Use:** @Bot show symbols\n` +
+      `**Who:** Anyone\n` +
+      `**What:** Shows tags that include symbols like <3 or :3\n\n` +
+
+      `!Help\n` +
+      `**Use:** !Help\n` +
+      `**Who:** Anyone\n` +
+      `**What:** shows commands of bot and what they do`
+    )
+    .setColor(0x2B90D9)
+    .setFooter({ text: 'This message will be deleted in 60 seconds.' });
+
+  // Send the embed in the same channel
+  const sentMsg = await message.channel.send({ embeds: [helpEmbed] });
+
+  // Delete the help embed after 60 seconds (60000 ms)
+  setTimeout(async () => {
+    try { await sentMsg.delete(); } catch (e) {}
+  }, 60000);
+});
+// ----------------------------
+
 // --- NEW: !fetch command for logging all guilds ---
 client.on("messageCreate", async (message) => {
   // Only allow bot owner or server admin to use this for security
