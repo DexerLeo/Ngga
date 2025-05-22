@@ -113,7 +113,6 @@ function searchTagsNormalized(query, tags) {
 
 // --- NEW: Guild Join Logging ---
 client.on("guildCreate", async (guild) => {
-  // Try catch so if we can't send, we don't crash
   try {
     const logChannel = await client.channels.fetch(LOGGING_CHANNEL_ID);
     if (!logChannel) return;
@@ -140,12 +139,10 @@ client.on("messageCreate", async (message) => {
     message.content.trim().toLowerCase() !== "!help"
   ) return;
 
-  // Attempt to delete the user's help message
   if (message.deletable) {
     try { await message.delete(); } catch (e) {}
   }
 
-  // Build help embed
   const helpEmbed = new EmbedBuilder()
     .setTitle("**Commands**")
     .setDescription(
@@ -153,6 +150,16 @@ client.on("messageCreate", async (message) => {
       `**Use:** @Bot addtag name, url\n` +
       `**Who:** Only users with BACKEND ACCESS role\n` +
       `**What:** Adds a tag to the database\n\n` +
+
+      `@Bot DT, [Link]\n` +
+      `**Use:** @Bot DT, link\n` +
+      `**Who:** Only users with BACKEND ACCESS role\n` +
+      `**What:** Delete tag by link, asks for confirmation\n\n` +
+
+      `@Bot RL, [Old Link] [New Link]\n` +
+      `**Use:** @Bot RL, oldLink newLink\n` +
+      `**Who:** Only users with BACKEND ACCESS role\n` +
+      `**What:** Replace tag's link, asks for confirmation\n\n` +
 
       `@Bot Show Japanese/Chinese/Korean\n\n` +
       `**Use:** @Bot show chinese/korean/japanese\n` +
@@ -172,21 +179,17 @@ client.on("messageCreate", async (message) => {
     .setColor(0x2B90D9)
     .setFooter({ text: 'This message will be deleted in 60 seconds.' });
 
-  // Send the embed in the same channel
   const sentMsg = await message.channel.send({ embeds: [helpEmbed] });
 
-  // Delete the help embed after 60 seconds (60000 ms)
   setTimeout(async () => {
     try { await sentMsg.delete(); } catch (e) {}
   }, 60000);
 });
 // ----------------------------
 
-// --- NEW: !fetch command for logging all guilds ---
+// --- !fetch command for logging all guilds ---
 client.on("messageCreate", async (message) => {
-  // Only allow bot owner or server admin to use this for security
   if (message.content.startsWith("!fetch")) {
-    // Extract channel ID or use the logging channel by default
     const args = message.content.split(" ");
     let channelId = args[1] || LOGGING_CHANNEL_ID;
     try {
@@ -213,6 +216,7 @@ client.on("messageCreate", async (message) => {
 });
 // --------------------------------------------------
 
+// ----- INTERACTION HANDLER (Slash Command Addtag) -----
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
   if (interaction.commandName === "addtag") {
@@ -222,17 +226,13 @@ client.on("interactionCreate", async interaction => {
       return;
     }
     const [nameRaw, linkRaw] = input.split(",");
-    const name = nameRaw.trim();
+    const name = `> Tags: ${nameRaw.trim()}`;
     const link = linkRaw.trim();
     if (!name || !link) {
       await interaction.reply({ content: "Both tag name and URL must be provided.", ephemeral: true });
       return;
     }
     const tags = loadTags();
-    if (tags.some(t => t.name.toLowerCase() === name.toLowerCase())) {
-      await interaction.reply({ content: `Tag with name "${name}" already exists.`, ephemeral: true });
-      return;
-    }
     tags.push({ name, link });
     if (saveTags(tags)) {
       await interaction.reply({ content: `Tag **${name}** added successfully!`, ephemeral: true });
@@ -241,6 +241,7 @@ client.on("interactionCreate", async interaction => {
     }
   }
 });
+// ------------------------------------------------------
 
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
@@ -251,10 +252,7 @@ client.on("messageCreate", async (message) => {
   const language = args[2]?.toLowerCase() || "";
 
   // --- ADD TAG (Text Command, role-restricted) ---
-  // Example: @Bot addtag rex, https://discord.gg/123
-  //          @Bot at rex, https://discord.gg/123
   if (command === "addtag" || command === "at") {
-    // Check if user has the allowed role (ALLOWED_ROLE_ID)
     const member = message.member;
     if (!member || !member.roles.cache.has(ALLOWED_ROLE_ID)) {
       await message.channel.send({
@@ -269,7 +267,6 @@ client.on("messageCreate", async (message) => {
       return;
     }
 
-    // Combine all args after the command into one string and split by first comma
     const addTagRaw = message.content
       .slice(message.content.indexOf(command) + command.length)
       .trim();
@@ -286,7 +283,7 @@ client.on("messageCreate", async (message) => {
       });
       return;
     }
-    const name = split[0].trim();
+    const name = `> Tags: ${split[0].trim()}`;
     const link = split.slice(1).join(",").trim();
     if (!name || !link) {
       await message.channel.send({
@@ -301,18 +298,6 @@ client.on("messageCreate", async (message) => {
       return;
     }
     const tags = loadTags();
-    if (tags.some(t => (t.name || "").toLowerCase() === name.toLowerCase())) {
-      await message.channel.send({
-        embeds: [
-          buildEmbed(
-            "❌ Add Tag Failed",
-            `Tag with name "${name}" already exists.`,
-            0xff0000
-          ),
-        ],
-      });
-      return;
-    }
     tags.push({ name, link });
     if (saveTags(tags)) {
       await message.channel.send({
@@ -335,6 +320,217 @@ client.on("messageCreate", async (message) => {
         ],
       });
     }
+    return;
+  }
+
+  // --- DELETE TAG (DT, [Link]) ---
+  if (command === "dt") {
+    const member = message.member;
+    if (!member || !member.roles.cache.has(ALLOWED_ROLE_ID)) {
+      await message.channel.send({
+        embeds: [
+          buildEmbed(
+            "❌ Permission Denied",
+            "You do not have permission to use this command.",
+            0xff0000
+          ),
+        ],
+      });
+      return;
+    }
+    const linkToDelete = args.slice(2).join(" ").trim();
+    if (!linkToDelete) {
+      await message.channel.send({
+        embeds: [
+          buildEmbed(
+            "❌ Delete Tag Failed",
+            "You must provide the link of the tag to delete. Example: `@Bot DT, https://discord.gg/yourlink`",
+            0xff0000
+          ),
+        ],
+      });
+      return;
+    }
+    const tags = loadTags();
+    const tagIndex = tags.findIndex(t => t.link === linkToDelete);
+    if (tagIndex === -1) {
+      await message.channel.send({
+        embeds: [
+          buildEmbed(
+            "❌ Delete Tag Failed",
+            "No tag found with that link.",
+            0xff0000
+          ),
+        ],
+      });
+      return;
+    }
+    const tag = tags[tagIndex];
+
+    const confirmRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("confirm_delete_tag")
+        .setLabel("Yes, Delete")
+        .setStyle(ButtonStyle.Danger),
+      new ButtonBuilder()
+        .setCustomId("cancel_delete_tag")
+        .setLabel("No, Cancel")
+        .setStyle(ButtonStyle.Secondary)
+    );
+    const confirmMsg = await message.channel.send({
+      embeds: [
+        buildEmbed(
+          "Delete Tag Confirmation",
+          `Are you sure you want to delete the tag:\n**${tag.name}**\n${tag.link}`,
+          0xffa500
+        )
+      ],
+      components: [confirmRow]
+    });
+
+    const filter = (i) => i.user.id === message.author.id;
+    const collector = confirmMsg.createMessageComponentCollector({ filter, max: 1, time: 30000 });
+
+    collector.on("collect", async (interaction) => {
+      if (interaction.customId === "confirm_delete_tag") {
+        tags.splice(tagIndex, 1);
+        saveTags(tags);
+        await interaction.update({
+          embeds: [
+            buildEmbed(
+              "✅ Tag Deleted",
+              `Tag **${tag.name}** deleted successfully!`,
+              0x32cd32
+            )
+          ],
+          components: []
+        });
+      } else {
+        await interaction.update({
+          embeds: [
+            buildEmbed(
+              "Cancelled",
+              "Delete tag action cancelled.",
+              0xffa500
+            )
+          ],
+          components: []
+        });
+      }
+    });
+    return;
+  }
+
+  // --- REPLACE LINK (RL, [Old Link] [New Link]) ---
+  if (command === "rl") {
+    const member = message.member;
+    if (!member || !member.roles.cache.has(ALLOWED_ROLE_ID)) {
+      await message.channel.send({
+        embeds: [
+          buildEmbed(
+            "❌ Permission Denied",
+            "You do not have permission to use this command.",
+            0xff0000
+          ),
+        ],
+      });
+      return;
+    }
+    // Format: @Bot RL, oldLink newLink
+    // Must consume everything after the comma, then split only for first 2 items
+    const rlRaw = message.content.match(/RL,\s*([^\s]+)\s+([^\s]+)/i);
+    if (!rlRaw) {
+      await message.channel.send({
+        embeds: [
+          buildEmbed(
+            "❌ Replace Link Failed",
+            "Invalid format! Use: `@Bot RL, oldLink newLink`",
+            0xff0000
+          ),
+        ],
+      });
+      return;
+    }
+    let [, oldLink, newLink] = rlRaw;
+    if (!oldLink || !newLink) {
+      await message.channel.send({
+        embeds: [
+          buildEmbed(
+            "❌ Replace Link Failed",
+            "You must provide both old link and new link. Example: `@Bot RL, oldLink newLink`",
+            0xff0000
+          ),
+        ],
+      });
+      return;
+    }
+    const tags = loadTags();
+    const tagIndex = tags.findIndex(t => t.link === oldLink);
+    if (tagIndex === -1) {
+      await message.channel.send({
+        embeds: [
+          buildEmbed(
+            "❌ Replace Link Failed",
+            "No tag found with that old link.",
+            0xff0000
+          ),
+        ],
+      });
+      return;
+    }
+
+    const tag = tags[tagIndex];
+    const confirmRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("confirm_replace_link")
+        .setLabel("Yes, Replace")
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId("cancel_replace_link")
+        .setLabel("No, Cancel")
+        .setStyle(ButtonStyle.Secondary)
+    );
+    const confirmMsg = await message.channel.send({
+      embeds: [
+        buildEmbed(
+          "Replace Link Confirmation",
+          `Are you sure you want to update the link for:\n**${tag.name}**\nFrom: ${tag.link}\nTo: ${newLink}`,
+          0xffa500
+        )
+      ],
+      components: [confirmRow]
+    });
+
+    const filter = (i) => i.user.id === message.author.id;
+    const collector = confirmMsg.createMessageComponentCollector({ filter, max: 1, time: 30000 });
+
+    collector.on("collect", async (interaction) => {
+      if (interaction.customId === "confirm_replace_link") {
+        tags[tagIndex].link = newLink;
+        saveTags(tags);
+        await interaction.update({
+          embeds: [
+            buildEmbed(
+              "✅ Link Replaced",
+              `Link for tag **${tag.name}** updated successfully!`,
+              0x32cd32
+            )
+          ],
+          components: []
+        });
+      } else {
+        await interaction.update({
+          embeds: [
+            buildEmbed(
+              "Cancelled",
+              "Replace link action cancelled.",
+              0xffa500
+            )
+          ],
+          components: []
+        });
+      }
+    });
     return;
   }
 
@@ -368,7 +564,6 @@ client.on("messageCreate", async (message) => {
       return chunk.map(t => `${t.name}\n${t.link}`).join("\n\n");
     }
 
-    // Initial Loading Embed
     const loadingEmbed = buildEmbed(
       `<a:loading:1373152608759582771> Loading...`,
       `Fetching tags..`,
@@ -440,7 +635,6 @@ client.on("messageCreate", async (message) => {
   // --- SYMBOLS SHOWCASE SECTION ---
   if (command === "show" && language === "symbols") {
     const allTags = loadTags();
-    // Find counts for each symbol
     const symbolCounts = {};
     for (const symbol of SYMBOLS) {
       symbolCounts[symbol] = allTags.filter(tag => (tag.name || "").toLowerCase().includes(symbol.toLowerCase())).length;
@@ -454,14 +648,12 @@ client.on("messageCreate", async (message) => {
         .setDisabled(symbolCounts[symbol] === 0)
     );
 
-    // Split buttons into rows of max 5 (Discord API limit)
     const rows = [];
     for (let i = 0; i < symbolButtons.length; i += 5) {
       rows.push(new ActionRowBuilder().addComponents(...symbolButtons.slice(i, i + 5)));
     }
 
     const pageSize = 8;
-    // Send initial embed
     const embed = buildEmbed(
       `Fetched ${allTags.length} Tags!`,
       "Select a symbol below to view tags containing it.",
@@ -469,7 +661,6 @@ client.on("messageCreate", async (message) => {
     );
     const sent = await message.channel.send({ embeds: [embed], components: rows });
 
-    // Collector for symbol buttons
     const filter = (interaction) =>
       interaction.message.id === sent.id &&
       interaction.user.id === message.author.id;
@@ -482,7 +673,6 @@ client.on("messageCreate", async (message) => {
 
     collector.on("collect", async (interaction) => {
       if (!inSymbolView && interaction.customId.startsWith("symbol_")) {
-        // Show tags for the clicked symbol
         lastSymbol = decodeURIComponent(interaction.customId.slice(7));
         const tagsWithSymbol = allTags.filter(tag => (tag.name || "").toLowerCase().includes(lastSymbol.toLowerCase()));
         symbolTagPages = [];
@@ -518,14 +708,12 @@ client.on("messageCreate", async (message) => {
         await interaction.update({ embeds: [embedSymbol], components: [navRow] });
 
       } else if (inSymbolView && interaction.customId === "symbol_back") {
-        // Go back to main symbol selection
         inSymbolView = false;
         lastSymbol = null;
         page = 0;
         await interaction.update({ embeds: [embed], components: rows });
 
       } else if (inSymbolView && (interaction.customId === "symbol_prev" || interaction.customId === "symbol_next")) {
-        // Paginate symbol tag pages
         if (interaction.customId === "symbol_prev" && page > 0) page--;
         if (interaction.customId === "symbol_next" && page < symbolTagPages.length - 1) page++;
         const desc = symbolTagPages[page].map((t, idx) => `${idx + 1 + page * pageSize}. **${t.name}**\n${t.link}`).join('\n\n');
@@ -561,11 +749,12 @@ client.on("messageCreate", async (message) => {
   }
 
   // --- Normalized Multi-Variant Tag Search Section ---
-  // If user just searches a tag: "@bot tagname"
+  // RL/DT commands are handled above, so skip search if those were used
+  if (["dt", "rl"].includes(command)) return;
+
   const tagQuery = args.slice(1).join(' ').trim();
   if (!tagQuery) return;
 
-  // Loading feedback
   let loadingEmbed = buildEmbed(
     `<a:loading:1373152608759582771> Starting...`,
     `Searching for tag: ${tagQuery}`,
@@ -573,13 +762,11 @@ client.on("messageCreate", async (message) => {
   );
   const sent = await message.channel.send({ embeds: [loadingEmbed] });
 
-  // Try normalized search first (find all DB variants of the tag)
   try {
     const allTags = loadTags();
     const normResults = searchTagsNormalized(tagQuery, allTags);
 
     if (normResults.length > 0) {
-      // Show all variants from DB for this tag (normal, styled, etc.)
       let desc = normResults.map(
         t => `**${t.name}**\n${t.link}`
       ).join('\n\n');
@@ -592,11 +779,8 @@ client.on("messageCreate", async (message) => {
       await sent.edit({ embeds: [embed], components: [] });
       return;
     }
-  } catch (e) {
-    // ignore and fall back to fuzzy search
-  }
+  } catch (e) {}
 
-  // Fallback: Fuzzy Search (old logic)
   try {
     const allTags = loadTags();
     const results = searchTagsFuzzy(tagQuery, allTags);
