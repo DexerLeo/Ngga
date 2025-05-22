@@ -436,9 +436,8 @@ client.on("messageCreate", async (message) => {
       });
       return;
     }
-    // Format: @Bot RL, oldLink newLink
-    // Must consume everything after the comma, then split only for first 2 items
-    const rlRaw = message.content.match(/RL,\s*([^\s]+)\s+([^\s]+)/i);
+    // Accept: @Bot RL, oldLink newLink  or @Bot RL oldLink newLink (comma optional)
+    const rlRaw = message.content.match(/RL,?\s*([^\s]+)\s+([^\s]+)/i);
     if (!rlRaw) {
       await message.channel.send({
         embeds: [
@@ -531,7 +530,7 @@ client.on("messageCreate", async (message) => {
         });
       }
     });
-    return;
+    return; // <--- Always return after handling RL
   }
 
   // --- Unicode Search Section (Show Chinese/Korean/Japanese) ---
