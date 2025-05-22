@@ -84,7 +84,7 @@ function searchTagsFuzzy(query, tags) {
     threshold: 0.4,
     includeScore: true,
     distance: 100,
-    minMatchCharLength: 3,
+    minMatchCharLength: 3, // Keep accuracy for longer queries
   });
   return fuse.search(query).map(res => res.item);
 }
@@ -530,7 +530,7 @@ client.on("messageCreate", async (message) => {
         });
       }
     });
-    return; // <--- Always return after handling RL
+    return;
   }
 
   // --- Unicode Search Section (Show Chinese/Korean/Japanese) ---
@@ -778,6 +778,27 @@ client.on("messageCreate", async (message) => {
       await sent.edit({ embeds: [embed], components: [] });
       return;
     }
+
+    // --- ADDED: Direct match for short queries (<=2 chars), removing "> Tags: " prefix for exact match ---
+    if (tagQuery.length <= 2) {
+      const exact = allTags.filter(t => {
+        const tagName = t.name.replace(/^>\s*tags:\s*/i, "").trim();
+        return normalizer.normalizeToAscii(tagName).toLowerCase() === normalizer.normalizeToAscii(tagQuery).toLowerCase();
+      });
+      if (exact.length > 0) {
+        let desc = exact.map(
+          t => `**${t.name}**\n${t.link}`
+        ).join('\n\n');
+        const embed = buildEmbed(
+          `Found ${exact.length} tag(s) exactly matching "${tagQuery}"`,
+          desc,
+          0x32cd32
+        );
+        await sent.edit({ embeds: [embed], components: [] });
+        return;
+      }
+    }
+    // ------------------------------------------------------
   } catch (e) {}
 
   try {
