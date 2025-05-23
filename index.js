@@ -33,6 +33,82 @@ const client = new Client({
 const LOGGING_CHANNEL_ID = "1373983013087613049";
 // ----------------------------
 
+// --- BEGIN ADDITIONS ---
+const NOT_FOUND_FILE = "./notFoundTags.json";
+const NOT_FOUND_EMBED_FILE = "./notFoundEmbedMsg.json";
+
+function loadNotFoundTags() {
+  try {
+    return JSON.parse(fs.readFileSync(NOT_FOUND_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+function saveNotFoundTags(obj) {
+  try {
+    fs.writeFileSync(NOT_FOUND_FILE, JSON.stringify(obj, null, 2));
+    return true;
+  } catch {
+    return false;
+  }
+}
+function tagShouldBeLogged(tag) {
+  return tag.length <= 5;
+}
+async function updateNotFoundEmbed(channel) {
+  const notFound = loadNotFoundTags();
+  const sorted = Object.entries(notFound)
+    .filter(([tag]) => tagShouldBeLogged(tag))
+    .sort((a, b) => b[1] - a[1]);
+  if (!sorted.length) return;
+
+  const desc = sorted.map(([tag, count], i) =>
+    `**${i + 1}.** \`${tag}\` — **${count}** time(s)`
+  ).join("\n");
+
+  const embed = new EmbedBuilder()
+    .setTitle("Top Not Found Tags (≤5 letters)")
+    .setDescription(desc)
+    .setColor(0xff0000)
+    .setFooter({ text: "Leaderboard of tags users searched but were NOT found." });
+
+  // Check if message exists
+  let msgId;
+  try {
+    msgId = JSON.parse(fs.readFileSync(NOT_FOUND_EMBED_FILE, "utf8")).msgId;
+  } catch {
+    msgId = null;
+  }
+  let sentMsg;
+  if (msgId) {
+    try {
+      sentMsg = await channel.messages.fetch(msgId);
+      await sentMsg.edit({ embeds: [embed] });
+    } catch {
+      sentMsg = await channel.send({ embeds: [embed] });
+      fs.writeFileSync(NOT_FOUND_EMBED_FILE, JSON.stringify({ msgId: sentMsg.id }, null, 2));
+    }
+  } else {
+    sentMsg = await channel.send({ embeds: [embed] });
+    fs.writeFileSync(NOT_FOUND_EMBED_FILE, JSON.stringify({ msgId: sentMsg.id }, null, 2));
+  }
+  return sentMsg;
+}
+client.on("messageDelete", async (msg) => {
+  if (msg.channelId !== LOGGING_CHANNEL_ID) return;
+  let msgId;
+  try {
+    msgId = JSON.parse(fs.readFileSync(NOT_FOUND_EMBED_FILE, "utf8")).msgId;
+  } catch {
+    return;
+  }
+  if (msg.id === msgId) {
+    const channel = await client.channels.fetch(LOGGING_CHANNEL_ID);
+    await updateNotFoundEmbed(channel);
+  }
+});
+// --- END ADDITIONS ---
+
 client.once("ready", () => {
   if (client.user) {
     console.log(`online as ${client.user.tag}`);
@@ -300,7 +376,11 @@ client.on("messageCreate", async (message) => {
     const tags = loadTags();
     tags.push({ name, link });
     if (saveTags(tags)) {
-      await message.channel.send({
+      // --- PATCH: Delete user command message and auto-delete confirmation ---
+      if (message.deletable) {
+        setTimeout(() => message.delete().catch(() => {}), 100);
+      }
+      const confirmMsg = await message.channel.send({
         embeds: [
           buildEmbed(
             "✅ Tag Added",
@@ -309,6 +389,7 @@ client.on("messageCreate", async (message) => {
           ),
         ],
       });
+      setTimeout(() => confirmMsg.delete().catch(() => {}), 5000);
     } else {
       await message.channel.send({
         embeds: [
@@ -395,6 +476,8 @@ client.on("messageCreate", async (message) => {
       if (interaction.customId === "confirm_delete_tag") {
         tags.splice(tagIndex, 1);
         saveTags(tags);
+        // PATCH: delete original command message
+        if (message.deletable) setTimeout(() => message.delete().catch(() => {}), 100);
         await interaction.update({
           embeds: [
             buildEmbed(
@@ -508,6 +591,8 @@ client.on("messageCreate", async (message) => {
       if (interaction.customId === "confirm_replace_link") {
         tags[tagIndex].link = newLink;
         saveTags(tags);
+        // PATCH: delete original command message
+        if (message.deletable) setTimeout(() => message.delete().catch(() => {}), 100);
         await interaction.update({
           embeds: [
             buildEmbed(
@@ -849,6 +934,15 @@ client.on("messageCreate", async (message) => {
         0xff0000
       );
       await sent.edit({ embeds: [noResultEmbed], components: [] });
+
+      // --- PATCH: LOG NOT FOUND TAGS ≤5 letters ---
+      if (tagShouldBeLogged(tagQuery)) {
+        const notFound = loadNotFoundTags();
+        notFound[tagQuery] = (notFound[tagQuery] || 0) + 1;
+        saveNotFoundTags(notFound);
+        const channel = await client.channels.fetch(LOGGING_CHANNEL_ID);
+        await updateNotFoundEmbed(channel);
+      }
     }
   } catch {
     const errorEmbed = buildEmbed(
