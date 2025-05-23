@@ -7,7 +7,9 @@ const Fuse = require("fuse.js");
 const TOKEN = process.env.TOKEN;
 const JSON_FILE = "./DBTag.json";
 
-// Role ID allowed to use the addtag command
+// Add this for PBS.json
+const PBS_FILE = "./PBS.json";
+
 const ALLOWED_ROLE_ID = "1373976275953385513";
 
 const SYMBOLS = [
@@ -145,6 +147,16 @@ function loadTags() {
   }
 }
 
+// --- LOAD PBS TAGS ---
+function loadPBSTags() {
+  try {
+    const rawData = fs.readFileSync(PBS_FILE);
+    return JSON.parse(rawData);
+  } catch {
+    return [];
+  }
+}
+
 function saveTags(tags) {
   try {
     fs.writeFileSync(JSON_FILE, JSON.stringify(tags, null, 2));
@@ -185,6 +197,16 @@ function buildTagDescription(tags, startIndex = 1) {
 function searchTagsNormalized(query, tags) {
   const normQuery = normalizer.normalizeToAscii(query);
   return tags.filter(t => normalizer.normalizeToAscii(t.name) === normQuery);
+}
+
+// --- PBS KEYWORD SEARCH ---
+function searchPBSTagsByKeyword(query, pbsTags) {
+  // Normalize query: uppercase, ascii, trim, etc.
+  const normQuery = normalizer.normalizeToAscii(query).toUpperCase().trim();
+  return pbsTags.filter(t =>
+    t.keyword &&
+    normalizer.normalizeToAscii(String(t.keyword)).toUpperCase().trim() === normQuery
+  );
 }
 
 // --- NEW: Guild Join Logging ---
@@ -858,6 +880,24 @@ client.on("messageCreate", async (message) => {
 
       const embed = buildEmbed(
         `Found ${normResults.length} variant(s) for "${tagQuery}"`,
+        desc,
+        0x32cd32
+      );
+      await sent.edit({ embeds: [embed], components: [] });
+      return;
+    }
+  } catch (e) {}
+
+  // --- PBS KEYWORD SEARCH: Inserted here ---
+  try {
+    const pbsTags = loadPBSTags();
+    const keywordResults = searchPBSTagsByKeyword(tagQuery, pbsTags);
+    if (keywordResults.length > 0) {
+      let desc = keywordResults.map(
+        t => `**${t.name}**\n${t.link}`
+      ).join('\n\n');
+      const embed = buildEmbed(
+        `Found ${keywordResults.length} PBS tag(s) for "${tagQuery}"`,
         desc,
         0x32cd32
       );
