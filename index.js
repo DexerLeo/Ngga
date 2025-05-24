@@ -6,21 +6,12 @@ const Fuse = require("fuse.js");
 
 const TOKEN = process.env.TOKEN;
 const JSON_FILE = "./DBTag.json";
-
-// Add this for PBS.json
-const PBS_FILE = "./PBS.json";
+const FONTED_FILE = "./Fonted.json";
 
 const ALLOWED_ROLE_ID = "1373976275953385513";
 
 const SYMBOLS = [
-  "<3",
-  ":3",
-  ";(",
-  ":p",
-  ":D",
-  ":P",
-  ":/",
-  ";p"
+  "<3", ":3", ";(", ":p", ":D", ":P", ":/", ";p"
 ];
 
 const client = new Client({
@@ -147,10 +138,10 @@ function loadTags() {
   }
 }
 
-// --- LOAD PBS TAGS ---
-function loadPBSTags() {
+// --- LOAD FONTED TAGS ---
+function loadFontedTags() {
   try {
-    const rawData = fs.readFileSync(PBS_FILE);
+    const rawData = fs.readFileSync(FONTED_FILE);
     return JSON.parse(rawData);
   } catch {
     return [];
@@ -199,11 +190,11 @@ function searchTagsNormalized(query, tags) {
   return tags.filter(t => normalizer.normalizeToAscii(t.name) === normQuery);
 }
 
-// --- PBS KEYWORD SEARCH ---
-function searchPBSTagsByKeyword(query, pbsTags) {
+// --- FONTED KEYWORD SEARCH ---
+function searchFontedTagsByKeyword(query, fontedTags) {
   // Normalize query: uppercase, ascii, trim, etc.
   const normQuery = normalizer.normalizeToAscii(query).toUpperCase().trim();
-  return pbsTags.filter(t =>
+  return fontedTags.filter(t =>
     t.keyword &&
     normalizer.normalizeToAscii(String(t.keyword)).toUpperCase().trim() === normQuery
   );
@@ -248,27 +239,22 @@ client.on("messageCreate", async (message) => {
       `**Use:** @Bot addtag name, url\n` +
       `**Who:** Only users with BACKEND ACCESS role\n` +
       `**What:** Adds a tag to the database\n\n` +
-
       `@Bot DT, [Link]\n` +
       `**Use:** @Bot DT, link\n` +
       `**Who:** Only users with BACKEND ACCESS role\n` +
       `**What:** Delete tag by link, asks for confirmation\n\n` +
-
       `@Bot RL, [Old Link] [New Link]\n` +
       `**Use:** @Bot RL, oldLink newLink\n` +
       `**Who:** Only users with BACKEND ACCESS role\n` +
       `**What:** Replace tag's link, asks for confirmation\n\n` +
-
       `@Bot Show Japanese/Chinese/Korean\n\n` +
       `**Use:** @Bot show chinese/korean/japanese\n` +
       `**Who:** Anyone\n` +
       `**What:** Shows tags with Chinese, Korean, or Japanese text\n\n` +
-
       `@Bot show symbols\n\n` +
       `**Use:** @Bot show symbols\n` +
       `**Who:** Anyone\n` +
       `**What:** Shows tags that include symbols like <3 or :3\n\n` +
-
       `!Help\n` +
       `**Use:** !Help\n` +
       `**Who:** Anyone\n` +
@@ -873,31 +859,22 @@ client.on("messageCreate", async (message) => {
     const allTags = loadTags();
     const normResults = searchTagsNormalized(tagQuery, allTags);
 
-    if (normResults.length > 0) {
-      let desc = normResults.map(
-        t => `**${t.name}**\n${t.link}`
-      ).join('\n\n');
+    const fontedTags = loadFontedTags();
+    const keywordResults = searchFontedTagsByKeyword(tagQuery, fontedTags);
 
+    if (normResults.length > 0 || keywordResults.length > 0) {
+      let desc = '';
+      if (normResults.length > 0) {
+        desc += `**Results from DBTag.json:**\n`;
+        desc += normResults.map(t => `**${t.name}**\n${t.link}`).join('\n\n');
+      }
+      if (keywordResults.length > 0) {
+        if (desc) desc += '\n\n';
+        desc += `**Results from Fonted.json:**\n`;
+        desc += keywordResults.map(t => `**${t.name}**\n${t.link}`).join('\n\n');
+      }
       const embed = buildEmbed(
-        `Found ${normResults.length} variant(s) for "${tagQuery}"`,
-        desc,
-        0x32cd32
-      );
-      await sent.edit({ embeds: [embed], components: [] });
-      return;
-    }
-  } catch (e) {}
-
-  // --- PBS KEYWORD SEARCH: Inserted here ---
-  try {
-    const pbsTags = loadPBSTags();
-    const keywordResults = searchPBSTagsByKeyword(tagQuery, pbsTags);
-    if (keywordResults.length > 0) {
-      let desc = keywordResults.map(
-        t => `**${t.name}**\n${t.link}`
-      ).join('\n\n');
-      const embed = buildEmbed(
-        `Found ${keywordResults.length} PBS tag(s) for "${tagQuery}"`,
+        `Found ${normResults.length + keywordResults.length} tag(s) for "${tagQuery}"`,
         desc,
         0x32cd32
       );
