@@ -1,0 +1,693 @@
+require('dotenv').config();
+// MADE BY KUA
+const { Client, GatewayIntentBits, EmbedBuilder, REST, Routes, ApplicationCommandOptionType } = require('discord.js');
+
+const client = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.GuildPresences,
+        GatewayIntentBits.MessageContent
+    ]
+});
+
+// Config
+const TARGET_TAGS = ['NAZІ', '.ĐⱠⱠ'];
+const ROLE_ID = process.env.ROLE_ID;
+const VERIFICATION_ROLE_ID = '1251215333583486998';
+const ADMIN_ROLE_ID = '1375824181756694668'; // Role ID for /scan command permission
+
+// Commands
+const commands = [
+    {
+        name: 'scan',
+        description: 'Trigger a tag scan',
+        options: [
+            {
+                name: 'user',
+                description: 'Specific user to scan (optional)',
+                type: ApplicationCommandOptionType.User,
+                required: false
+            }
+        ]
+    }
+];
+
+// Register commands
+const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+
+async function registerCommands() {
+    // Check environment variables
+    if (!process.env.CLIENT_ID) {
+        console.error('\nCLIENT_ID is missing in .env file!');
+        console.log('Please add CLIENT_ID=your_bot_client_id to your .env file');
+        return;
+    }
+
+    if (!process.env.GUILD_ID) {
+        console.error('\nGUILD_ID is missing in .env file!');
+        console.log('Please add GUILD_ID=your_server_id to your .env file');
+        return;
+    }
+
+    try {
+        console.log('Registering slash commands...');
+        
+        // Log the values being used
+        const clientIdPreview = `${process.env.CLIENT_ID.slice(0, 4)}...${process.env.CLIENT_ID.slice(-4)}`;
+        const guildIdPreview = `${process.env.GUILD_ID.slice(0, 4)}...${process.env.GUILD_ID.slice(-4)}`;
+        console.log(`Using Client ID: ${clientIdPreview}`);
+        console.log(`Using Guild ID: ${guildIdPreview}`);
+
+        await rest.put(
+            Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
+            { body: commands }
+        );
+        console.log('Slash commands registered successfully\n');
+    } catch (error) {
+        if (error.code === 50035) {
+            console.error('\nInvalid Client ID or Guild ID!');
+            console.log('Please check your .env file contains valid IDs:');
+            console.log('CLIENT_ID=your_bot_client_id');
+            console.log('GUILD_ID=your_server_id');
+        } else {
+            console.error('\nError registering commands:', error);
+        }
+    }
+}
+
+// Rate limiting and error tracking
+let requestQueue = [];
+let isProcessing = false;
+let errorTracker = new Map(); // Track errors per user
+
+// Helper to track errors
+function trackError(userId, error) {
+    if (!errorTracker.has(userId)) {
+        errorTracker.set(userId, { count: 0, firstError: Date.now() });
+    }
+    const tracker = errorTracker.get(userId);
+    tracker.count++;
+    
+    // Reset counter if it's been more than 1 hour since first error
+    if (Date.now() - tracker.firstError > 3600000) {
+        tracker.count = 1;
+        tracker.firstError = Date.now();
+    }
+
+    return tracker.count >= 3;
+}
+
+async function sendEmbed(guild, member, type, tag = null) {
+    const channel = guild.channels.cache.get(process.env.NOTIFICATION_CHANNEL_ID);
+    if (!channel) return;
+
+    // Get count of members with the role
+    const role = guild.roles.cache.get(ROLE_ID);
+    const tagUserCount = role ? role.members.size : 0;
+
+    let embed;
+    if (type === 'add') {
+        embed = new EmbedBuilder()
+            .setColor('#00ff00')
+            .setTitle('New Tag User')
+            .setDescription(`<@${member.user.id}> is now using **${tag}**`)
+            .setFooter({ text: `${tagUserCount} users with tag | MADE BY <@1002231598118346842>` })
+            .setTimestamp();
+    } else {
+        embed = new EmbedBuilder()
+            .setColor('#ff6b6b')
+            .setTitle('User Stopped Using Tag')
+            .setDescription(`<@${member.user.id}> removed their tag`)
+            .setFooter({ text: `${tagUserCount} users with tag | MADE BY <@1002231598118346842>` })
+            .setTimestamp();
+    }
+
+    await channel.send({ embeds: [embed] });
+}
+
+async function processQueue() {
+    if (isProcessing || requestQueue.length === 0) return;
+    isProcessing = true;
+
+    try {
+        const { member, guild } = requestQueue[0];
+
+        // Skip if user has had too many errors
+        if (errorTracker.has(member.user.id) && trackError(member.user.id)) {
+            requestQueue.shift();
+            isProcessing = false;
+            processQueue();
+            return;
+        }
+
+        // Only check members with the membr role
+        if (!member.roles.cache.has(VERIFICATION_ROLE_ID)) {
+            requestQueue.shift();
+            isProcessing = false;
+            processQueue();
+            return;
+        }
+
+        // Get the role
+        const role = guild.roles.cache.get(ROLE_ID);
+        if (!role) {
+            console.log(`⚠️ Role not found! Make sure ROLE_ID is correct in .env`);
+            requestQueue.shift();
+            isProcessing = false;
+            processQueue();
+            return;
+        }
+
+        // Get current state
+        const hasRole = member.roles.cache.has(ROLE_ID);
+
+        // Fetch current tag state
+        const response = await fetch(`https://discord.com/api/v10/guilds/${guild.id}/members/${member.user.id}`, {
+            headers: {
+                'Authorization': `Bot ${process.env.TOKEN}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (response.status === 429) {
+            const retryAfter = parseInt(response.headers.get('Retry-After')) || 5;
+            setTimeout(() => {
+                isProcessing = false;
+                processQueue();
+            }, retryAfter * 1000);
+            return;
+        }
+
+        if (!response.ok) {
+            if (response.status === 404) {
+                if (trackError(member.user.id, 'API 404')) {
+                    console.log(`⚠️ Skipping ${member.user.username} due to repeated 404 errors`);
+                }
+            }
+            requestQueue.shift();
+            isProcessing = false;
+            processQueue();
+            return;
+        }
+
+        // Reset error count on successful request
+        errorTracker.delete(member.user.id);
+
+        const memberData = await response.json();
+        
+        // Check both clan and primary guild tags
+        let activeTag = null;
+        const clanTag = memberData.user?.clan?.tag;
+        const primaryGuildTag = memberData.user?.primary_guild?.tag;
+        const clanEnabled = memberData.user?.clan?.identity_enabled;
+        const primaryGuildEnabled = memberData.user?.primary_guild?.identity_enabled;
+
+        // Check each target tag
+        for (const tag of TARGET_TAGS) {
+            if ((clanTag === tag && clanEnabled) || (primaryGuildTag === tag && primaryGuildEnabled)) {
+                activeTag = tag;
+                break;
+            }
+        }
+
+        // Only update if there's a mismatch
+        if (activeTag && !hasRole) {
+            await member.roles.add(role);
+            await sendEmbed(guild, member, 'add', activeTag);
+            console.log(`Added role to ${member.user.username} (Tag: ${activeTag})`);
+        } else if (!activeTag && hasRole) {
+            await member.roles.remove(role);
+            await sendEmbed(guild, member, 'remove');
+            console.log(`Removed role from ${member.user.username}`);
+        }
+
+        // Remove processed request and continue
+        requestQueue.shift();
+        setTimeout(() => {
+            isProcessing = false;
+            processQueue();
+        }, 1000); // Wait a sec between requests
+    } catch (error) {
+        console.error('Error:', error);
+        requestQueue.shift();
+        isProcessing = false;
+        processQueue();
+    }
+}
+
+async function checkMemberTag(member, guild) {
+    requestQueue.push({ member, guild });
+    processQueue();
+}
+
+// Handle slash commands
+client.on('interactionCreate', async interaction => {
+    if (!interaction.isChatInputCommand()) return;
+
+    if (interaction.commandName === 'scan') {
+        // Check if user has the required role
+        if (!interaction.member.roles.cache.has(ADMIN_ROLE_ID)) {
+            const noPermissionEmbed = new EmbedBuilder()
+                .setColor('#ff0000')
+                .setTitle('No Permission')
+                .setDescription('You do not have permission to use this command.')
+                .setFooter({ text: 'MADE BY <@1002231598118346842>' })
+                .setTimestamp();
+            await interaction.reply({ embeds: [noPermissionEmbed], flags: 64 }); // 64 = Ephemeral
+            return;
+        }
+
+        await interaction.deferReply();
+        const startTime = Date.now();
+        const targetUser = interaction.options.getUser('user');
+
+        try {
+            const guild = interaction.guild;
+            if (!guild) {
+                const errorEmbed = new EmbedBuilder()
+                    .setColor('#ff0000')
+                    .setTitle('Error')
+                    .setDescription('Could not access guild!')
+                    .setFooter({ text: 'MADE BY <@1002231598118346842>' })
+                    .setTimestamp();
+                await interaction.editReply({ embeds: [errorEmbed] });
+                return;
+            }
+
+            if (targetUser) {
+                // Scan specific user
+                const member = await guild.members.fetch(targetUser.id);
+                if (!member) {
+                    const errorEmbed = new EmbedBuilder()
+                        .setColor('#ff0000')
+                        .setTitle('Error')
+                        .setDescription('Could not find that user in the server!')
+                        .setFooter({ text: 'MADE BY <@1002231598118346842>' })
+                        .setTimestamp();
+                    await interaction.editReply({ embeds: [errorEmbed] });
+                    return;
+                }
+
+                const startEmbed = new EmbedBuilder()
+                    .setColor('#ffa500')
+                    .setTitle('Starting User Scan')
+                    .setDescription(`Scanning user: ${member.user.username}`)
+                    .setFooter({ text: 'MADE BY <@1002231598118346842>' })
+                    .setTimestamp();
+                await interaction.editReply({ embeds: [startEmbed] });
+
+                await checkMemberTag(member, guild);
+                const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+
+                const completedEmbed = new EmbedBuilder()
+                    .setColor('#00ff00')
+                    .setTitle('Scan Completed')
+                    .setDescription(`Scan completed for ${member.user.username}`)
+                    .addFields({ name: 'Time Taken', value: `${duration} seconds` })
+                    .setFooter({ text: 'MADE BY <@1002231598118346842>' })
+                    .setTimestamp();
+                await interaction.editReply({ embeds: [completedEmbed] });
+            } else {
+                // Full server scan
+                console.log('\nStarting full server scan...');
+                const startEmbed = new EmbedBuilder()
+                    .setColor('#ffa500')
+                    .setTitle('Starting Full Server Scan')
+                    .setDescription('Beginning scan of all server members...')
+                    .setFooter({ text: 'MADE BY <@1002231598118346842>' })
+                    .setTimestamp();
+                await interaction.editReply({ embeds: [startEmbed] });
+                
+                try {
+                    // Force a fresh fetch of ALL members
+                    const members = await guild.members.fetch({ force: true });
+                    const totalMembers = members.size;
+                    const nonBotMembers = members.filter(member => !member.user.bot).size;
+                    console.log(`Found ${nonBotMembers} non-bot members to scan`);
+                    
+                    let processedCount = 0;
+                    let rolesAdded = [];
+                    let rolesRemoved = [];
+                    let lastUpdate = Date.now();
+
+                    // Process in batches to avoid rate limits
+                    for (const [id, member] of members) {
+                        if (member.user.bot) continue;
+                        processedCount++;
+
+                        // Track current role state
+                        const hadRole = member.roles.cache.has(ROLE_ID);
+                        
+                        // Check for tag
+                        const response = await fetch(`https://discord.com/api/v10/guilds/${guild.id}/members/${member.user.id}`, {
+                            headers: {
+                                'Authorization': `Bot ${process.env.TOKEN}`,
+                                'Content-Type': 'application/json'
+                            }
+                        });
+
+                        if (response.ok) {
+                            const memberData = await response.json();
+                            const clanTag = memberData.user?.clan?.tag;
+                            const primaryGuildTag = memberData.user?.primary_guild?.tag;
+                            const clanEnabled = memberData.user?.clan?.identity_enabled;
+                            const primaryGuildEnabled = memberData.user?.primary_guild?.identity_enabled;
+
+                            const hasValidTag = TARGET_TAGS.some(tag => {
+                                if ((clanTag === tag && clanEnabled) || (primaryGuildTag === tag && primaryGuildEnabled)) {
+                                    return tag;
+                                }
+                                return false;
+                            });
+
+                            // Update role if needed
+                            if (hasValidTag && !hadRole) {
+                                await member.roles.add(ROLE_ID);
+                                rolesAdded.push(member.user.username);
+                                console.log(`Added role to ${member.user.username}`);
+                                const activeTag = TARGET_TAGS.find(tag => 
+                                    (clanTag === tag && clanEnabled) || 
+                                    (primaryGuildTag === tag && primaryGuildEnabled)
+                                );
+                                await sendEmbed(guild, member, 'add', activeTag);
+                            } else if (!hasValidTag && hadRole) {
+                                await member.roles.remove(ROLE_ID);
+                                rolesRemoved.push(member.user.username);
+                                console.log(`Removed role from ${member.user.username}`);
+                                await sendEmbed(guild, member, 'remove');
+                            }
+                        }
+
+                        // Update progress every 5 seconds or every 50 members
+                        if (processedCount % 50 === 0 || Date.now() - lastUpdate >= 5000) {
+                            const progress = ((processedCount / nonBotMembers) * 100).toFixed(1);
+                            console.log(`Progress: ${progress}% (${processedCount}/${nonBotMembers})`);
+                            
+                            const progressEmbed = new EmbedBuilder()
+                                .setColor('#ffa500')
+                                .setTitle('Scan in Progress')
+                                .setDescription('Scanning server members...')
+                                .addFields(
+                                    { name: 'Progress', value: `${progress}% (${processedCount}/${nonBotMembers})`, inline: true },
+                                    { name: 'Roles Added', value: `${rolesAdded.length}`, inline: true },
+                                    { name: 'Roles Removed', value: `${rolesRemoved.length}`, inline: true }
+                                )
+                                .setFooter({ text: 'Please wait while the scan completes...' })
+                                .setTimestamp();
+                            await interaction.editReply({ embeds: [progressEmbed] });
+                            lastUpdate = Date.now();
+                        }
+
+                        // Small delay to avoid rate limits
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+
+                    const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+                    console.log('\nScan Completed:');
+                    console.log(`Time taken: ${duration} seconds`);
+                    console.log(`Members processed: ${processedCount}`);
+                    console.log('\nRoles Added:');
+                    rolesAdded.forEach(name => console.log(`➕ ${name}`));
+                    console.log('\nRoles Removed:');
+                    rolesRemoved.forEach(name => console.log(`➖ ${name}`));
+
+                    const completedEmbed = new EmbedBuilder()
+                        .setColor('#00ff00')
+                        .setTitle('Full Scan Completed')
+                        .addFields(
+                            { name: 'Time Taken', value: `${duration} seconds`, inline: true },
+                            { name: 'Members Processed', value: `${processedCount}`, inline: true },
+                            { name: 'Role Changes', value: `Added: ${rolesAdded.length}\nRemoved: ${rolesRemoved.length}`, inline: true }
+                        )
+                        .setDescription(
+                            rolesAdded.length + rolesRemoved.length > 0 
+                                ? '**Changes Made:**\n' +
+                                  (rolesAdded.length > 0 ? `Added to: ${rolesAdded.join(', ')}\n` : '') +
+                                  (rolesRemoved.length > 0 ? `Removed from: ${rolesRemoved.join(', ')}` : '')
+                                : 'No role changes were needed.'
+                        )
+                        .setFooter({ text: 'Scan completed successfully' })
+                        .setTimestamp();
+                    await interaction.editReply({ embeds: [completedEmbed] });
+
+                } catch (fetchError) {
+                    console.error('Error fetching members:', fetchError);
+                    const errorEmbed = new EmbedBuilder()
+                        .setColor('#ff0000')
+                        .setTitle('Error')
+                        .setDescription('Error fetching members! Please try again.')
+                        .setTimestamp();
+                    await interaction.editReply({ embeds: [errorEmbed] });
+                    return;
+                }
+            }
+        } catch (error) {
+            console.error('Error during command scan:', error);
+            const errorEmbed = new EmbedBuilder()
+                .setColor('#ff0000')
+                .setTitle('Error')
+                .setDescription('An error occurred during the scan!')
+                .setTimestamp();
+            await interaction.editReply({ embeds: [errorEmbed] });
+        }
+    }
+});
+
+client.once('ready', async () => {
+    console.log(`Bot is online as ${client.user.tag}`);
+    
+    // Register commands when bot starts
+    await registerCommands();
+    
+    // Set bot presence
+    client.user.setPresence({
+        activities: [{ name: '.gg/viridia', type: 3 }],
+        status: 'dnd'
+    });
+
+    // Do initial scan when bot starts
+    const guild = client.guilds.cache.get(process.env.GUILD_ID);
+    if (guild) {
+        console.log('Starting initial boot scan...');
+        try {
+            const startTime = Date.now();
+
+            // Fetch all members
+            await guild.members.fetch({ force: true });
+            const members = Array.from(guild.members.cache.values());
+            const nonBotMembers = members.filter(member => !member.user.bot).length;
+            console.log(`Found ${nonBotMembers} non-bot members to scan`);
+            
+            let processedCount = 0;
+            let rolesAdded = [];
+            let rolesRemoved = [];
+            
+            // Process all members
+            for (const member of members) {
+                if (member.user.bot) continue;
+                processedCount++;
+                
+                // Track current role state
+                const hadRole = member.roles.cache.has(ROLE_ID);
+                
+                // Check for tag
+                const response = await fetch(`https://discord.com/api/v10/guilds/${guild.id}/members/${member.user.id}`, {
+                    headers: {
+                        'Authorization': `Bot ${process.env.TOKEN}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                if (response.ok) {
+                    const memberData = await response.json();
+                    const clanTag = memberData.user?.clan?.tag;
+                    const primaryGuildTag = memberData.user?.primary_guild?.tag;
+                    const clanEnabled = memberData.user?.clan?.identity_enabled;
+                    const primaryGuildEnabled = memberData.user?.primary_guild?.identity_enabled;
+
+                    const hasValidTag = TARGET_TAGS.some(tag => {
+                        if ((clanTag === tag && clanEnabled) || (primaryGuildTag === tag && primaryGuildEnabled)) {
+                            return tag;
+                        }
+                        return false;
+                    });
+
+                    // Update role if needed
+                    if (hasValidTag && !hadRole) {
+                        await member.roles.add(ROLE_ID);
+                        rolesAdded.push(member.user.username);
+                        console.log(`Added role to ${member.user.username}`);
+                        const activeTag = TARGET_TAGS.find(tag => 
+                            (clanTag === tag && clanEnabled) || 
+                            (primaryGuildTag === tag && primaryGuildEnabled)
+                        );
+                        await sendEmbed(guild, member, 'add', activeTag);
+                    } else if (!hasValidTag && hadRole) {
+                        await member.roles.remove(ROLE_ID);
+                        rolesRemoved.push(member.user.username);
+                        console.log(`Removed role from ${member.user.username}`);
+                        await sendEmbed(guild, member, 'remove');
+                    }
+                }
+
+                // Log progress every 100 members
+                if (processedCount % 100 === 0) {
+                    const progress = ((processedCount / nonBotMembers) * 100).toFixed(1);
+                    console.log(`Progress: ${progress}% (${processedCount}/${nonBotMembers})`);
+                }
+
+                // Small delay to avoid rate limits
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+
+            const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+            
+            // Only log completion details if there were changes
+            if (rolesAdded.length > 0 || rolesRemoved.length > 0) {
+                console.log('\nInitial scan completed with changes:');
+                console.log(`Time taken: ${duration} seconds`);
+                console.log(`Members processed: ${processedCount}`);
+                if (rolesAdded.length > 0) {
+                    console.log('\nRoles Added:');
+                    rolesAdded.forEach(name => console.log(`   ${name}`));
+                }
+                if (rolesRemoved.length > 0) {
+                    console.log('\nRoles Removed:');
+                    rolesRemoved.forEach(name => console.log(`   ${name}`));
+                }
+            } else {
+                console.log(`\nInitial scan completed (${duration}s) - No changes needed`);
+            }
+            console.log('\n');
+
+        } catch (error) {
+            console.error('Error during initial scan:', error);
+        }
+    }
+});
+
+// Listen for profile updates
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
+    if (oldMember.roles.cache.has(VERIFICATION_ROLE_ID) || 
+        newMember.roles.cache.has(VERIFICATION_ROLE_ID)) {
+        await checkMemberTag(newMember, newMember.guild);
+    }
+});
+
+// Check tag members every 15 seconds
+setInterval(async () => {
+    const guild = client.guilds.cache.get(process.env.GUILD_ID);
+    if (!guild) return;
+
+    const verificationRole = guild.roles.cache.get(VERIFICATION_ROLE_ID);
+    if (!verificationRole) return;
+
+    for (const [memberId, member] of verificationRole.members) {
+        await checkMemberTag(member, guild);
+    }
+}, 15000);
+
+// Full server scan every 5 minutes
+setInterval(async () => {
+    const guild = client.guilds.cache.get(process.env.GUILD_ID);
+    if (!guild) return;
+
+    try {
+        console.log('\nStarting automated 5-minute scan...');
+        const startTime = Date.now();
+
+        // Fetch all members
+        await guild.members.fetch({ force: true });
+        const members = Array.from(guild.members.cache.values());
+        const nonBotMembers = members.filter(member => !member.user.bot).length;
+        console.log(`Found ${nonBotMembers} non-bot members to scan`);
+        
+        let processedCount = 0;
+        let rolesAdded = [];
+        let rolesRemoved = [];
+        
+        // Process all members
+        for (const member of members) {
+            if (member.user.bot) continue;
+            processedCount++;
+            
+            // Track current role state
+            const hadRole = member.roles.cache.has(ROLE_ID);
+            
+            // Check for tag
+            const response = await fetch(`https://discord.com/api/v10/guilds/${guild.id}/members/${member.user.id}`, {
+                headers: {
+                    'Authorization': `Bot ${process.env.TOKEN}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            if (response.ok) {
+                const memberData = await response.json();
+                const clanTag = memberData.user?.clan?.tag;
+                const primaryGuildTag = memberData.user?.primary_guild?.tag;
+                const clanEnabled = memberData.user?.clan?.identity_enabled;
+                const primaryGuildEnabled = memberData.user?.primary_guild?.identity_enabled;
+
+                const hasValidTag = TARGET_TAGS.some(tag => {
+                    if ((clanTag === tag && clanEnabled) || (primaryGuildTag === tag && primaryGuildEnabled)) {
+                        return tag;
+                    }
+                    return false;
+                });
+
+                // Update role if needed
+                if (hasValidTag && !hadRole) {
+                    await member.roles.add(ROLE_ID);
+                    rolesAdded.push(member.user.username);
+                    console.log(`Added role to ${member.user.username}`);
+                    const activeTag = TARGET_TAGS.find(tag => 
+                        (clanTag === tag && clanEnabled) || 
+                        (primaryGuildTag === tag && primaryGuildEnabled)
+                    );
+                    await sendEmbed(guild, member, 'add', activeTag);
+                } else if (!hasValidTag && hadRole) {
+                    await member.roles.remove(ROLE_ID);
+                    rolesRemoved.push(member.user.username);
+                    console.log(`Removed role from ${member.user.username}`);
+                    await sendEmbed(guild, member, 'remove');
+                }
+            }
+
+            // Log progress every 100 members
+            if (processedCount % 100 === 0) {
+                const progress = ((processedCount / nonBotMembers) * 100).toFixed(1);
+                console.log(`Progress: ${progress}% (${processedCount}/${nonBotMembers})`);
+            }
+
+            // Small delay to avoid rate limits
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+        
+        if (rolesAdded.length > 0 || rolesRemoved.length > 0) {
+            console.log('\nAutomated scan completed with changes:');
+            console.log(`Time taken: ${duration} seconds`);
+            console.log(`Members processed: ${processedCount}`);
+            if (rolesAdded.length > 0) {
+                console.log('\nRoles Added:');
+                rolesAdded.forEach(name => console.log(`   ${name}`));
+            }
+            if (rolesRemoved.length > 0) {
+                console.log('\nRoles Removed:');
+                rolesRemoved.forEach(name => console.log(`   ${name}`));
+            }
+        } else {
+            console.log(`\nAutomated scan completed (${duration}s) - No changes needed`);
+        }
+        console.log('\n');
+
+    } catch (error) {
+        console.error('Error during automated scan:', error);
+    }
+}, 300000);
+
+client.login(process.env.TOKEN); 
