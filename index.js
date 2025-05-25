@@ -26,7 +26,6 @@ const client = new Client({
 const LOGGING_CHANNEL_ID = "1373983013087613049";
 // ----------------------------
 
-// --- BEGIN ADDITIONS ---
 const NOT_FOUND_FILE = "./notFoundTags.json";
 const NOT_FOUND_EMBED_FILE = "./notFoundEmbedMsg.json";
 
@@ -100,7 +99,6 @@ client.on("messageDelete", async (msg) => {
     await updateNotFoundEmbed(channel);
   }
 });
-// --- END ADDITIONS ---
 
 client.once("ready", () => {
   if (client.user) {
@@ -187,7 +185,14 @@ function buildTagDescription(tags, startIndex = 1) {
 // MAIN: Normalized search for all DB-stored variants
 function searchTagsNormalized(query, tags) {
   const normQuery = normalizer.normalizeToAscii(query);
-  return tags.filter(t => normalizer.normalizeToAscii(t.name) === normQuery);
+  return tags.filter(t => {
+    let keyword = t.name;
+    if (keyword.includes(':')) {
+      keyword = keyword.split(':').pop();
+    }
+    keyword = keyword.trim();
+    return normalizer.normalizeToAscii(keyword) === normQuery;
+  });
 }
 
 // --- FONTED KEYWORD SEARCH ---
@@ -218,7 +223,6 @@ client.on("guildCreate", async (guild) => {
     console.error("Failed to log guild join:", err);
   }
 });
-// ------------------------------
 
 // --- !help Command Handler ---
 client.on("messageCreate", async (message) => {
@@ -269,7 +273,6 @@ client.on("messageCreate", async (message) => {
     try { await sentMsg.delete(); } catch (e) {}
   }, 60000);
 });
-// ----------------------------
 
 // --- !fetch command for logging all guilds ---
 client.on("messageCreate", async (message) => {
@@ -298,7 +301,6 @@ client.on("messageCreate", async (message) => {
     return;
   }
 });
-// --------------------------------------------------
 
 // ----- INTERACTION HANDLER (Slash Command Addtag) -----
 client.on("interactionCreate", async interaction => {
@@ -325,7 +327,6 @@ client.on("interactionCreate", async interaction => {
     }
   }
 });
-// ------------------------------------------------------
 
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
@@ -384,7 +385,6 @@ client.on("messageCreate", async (message) => {
     const tags = loadTags();
     tags.push({ name, link });
     if (saveTags(tags)) {
-      // --- PATCH: Delete user command message and auto-delete confirmation ---
       if (message.deletable) {
         setTimeout(() => message.delete().catch(() => {}), 100);
       }
@@ -484,7 +484,6 @@ client.on("messageCreate", async (message) => {
       if (interaction.customId === "confirm_delete_tag") {
         tags.splice(tagIndex, 1);
         saveTags(tags);
-        // PATCH: delete original command message
         if (message.deletable) setTimeout(() => message.delete().catch(() => {}), 100);
         await interaction.update({
           embeds: [
@@ -527,8 +526,6 @@ client.on("messageCreate", async (message) => {
       });
       return;
     }
-    // Format: @Bot RL, oldLink newLink
-    // Must consume everything after the comma, then split only for first 2 items
     const rlRaw = message.content.match(/RL,\s*([^\s]+)\s+([^\s]+)/i);
     if (!rlRaw) {
       await message.channel.send({
@@ -599,7 +596,6 @@ client.on("messageCreate", async (message) => {
       if (interaction.customId === "confirm_replace_link") {
         tags[tagIndex].link = newLink;
         saveTags(tags);
-        // PATCH: delete original command message
         if (message.deletable) setTimeout(() => message.delete().catch(() => {}), 100);
         await interaction.update({
           embeds: [
@@ -857,28 +853,98 @@ client.on("messageCreate", async (message) => {
 
   try {
     const allTags = loadTags();
+    const fontedTags = loadFontedTags();
+
+    const keywordResults = searchFontedTagsByKeyword(tagQuery, fontedTags);
     const normResults = searchTagsNormalized(tagQuery, allTags);
 
-    const fontedTags = loadFontedTags();
-    const keywordResults = searchFontedTagsByKeyword(tagQuery, fontedTags);
+    // Prioritize Fonted.json, then DBTag.json
+    const combinedResults = [...keywordResults, ...normResults];
 
-    if (normResults.length > 0 || keywordResults.length > 0) {
-      let desc = '';
-      if (normResults.length > 0) {
-        desc += `**Results from DBTag.json:**\n`;
-        desc += normResults.map(t => `**${t.name}**\n${t.link}`).join('\n\n');
+    if (combinedResults.length > 0) {
+      let page = 0;
+      const pageSize = 5;
+      const totalPages = Math.ceil(combinedResults.length / pageSize);
+
+      function buildPagedDescription(results, page, pageSize) {
+        const chunk = results.slice(page * pageSize, (page + 1) * pageSize);
+        let desc = "";
+        if (keywordResults.length > 0 && page * pageSize < keywordResults.length) {
+          // Show Fonted.json header if there are any fonted results on this page
+          const fontedChunk = chunk.filter(t => keywordResults.includes(t));
+          if (fontedChunk.length > 0) {
+            desc += `**Results from Fonted.json:**\n`;
+            desc += fontedChunk.map(t => `**${t.name}**\n${t.link}`).join('\n\n');
+          }
+        }
+        if (normResults.length > 0) {
+          // Show DBTag.json header if there are any dbtag results on this page
+          const dbChunk = chunk.filter(t => normResults.includes(t));
+          if (dbChunk.length > 0) {
+            if (desc) desc += '\n\n';
+            desc += `**Results from DBTag.json:**\n`;
+            desc += dbChunk.map(t => `**${t.name}**\n${t.link}`).join('\n\n');
+          }
+        }
+        return desc;
       }
-      if (keywordResults.length > 0) {
-        if (desc) desc += '\n\n';
-        desc += `**Results from Fonted.json:**\n`;
-        desc += keywordResults.map(t => `**${t.name}**\n${t.link}`).join('\n\n');
-      }
+
+      let desc = buildPagedDescription(combinedResults, page, pageSize);
       const embed = buildEmbed(
-        `Found ${normResults.length + keywordResults.length} tag(s) for "${tagQuery}"`,
+        `Found ${combinedResults.length} tag(s) for "${tagQuery}" (Page ${page + 1}/${totalPages})`,
         desc,
         0x32cd32
       );
-      await sent.edit({ embeds: [embed], components: [] });
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("search_prev")
+          .setLabel("⬅️")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(true),
+        new ButtonBuilder()
+          .setCustomId("search_next")
+          .setLabel("➡️")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(totalPages <= 1)
+      );
+
+      await sent.edit({ embeds: [embed], components: [row] });
+
+      const filter = (interaction) =>
+        (interaction.customId === "search_prev" || interaction.customId === "search_next") &&
+        interaction.message.id === sent.id &&
+        interaction.user.id === message.author.id;
+
+      const collector = sent.createMessageComponentCollector({ filter, time: 180000 });
+
+      collector.on("collect", async (interaction) => {
+        if (interaction.customId === "search_prev" && page > 0) {
+          page--;
+        } else if (interaction.customId === "search_next" && page < totalPages - 1) {
+          page++;
+        }
+        desc = buildPagedDescription(combinedResults, page, pageSize);
+        const embedUpdated = buildEmbed(
+          `Found ${combinedResults.length} tag(s) for "${tagQuery}" (Page ${page + 1}/${totalPages})`,
+          desc,
+          0x32cd32
+        );
+        const rowUpdated = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId("search_prev")
+            .setLabel("⬅️")
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(page === 0),
+          new ButtonBuilder()
+            .setCustomId("search_next")
+            .setLabel("➡️")
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(page >= totalPages - 1)
+        );
+        await interaction.update({ embeds: [embedUpdated], components: [rowUpdated] });
+      });
+
       return;
     }
   } catch (e) {}
@@ -952,7 +1018,6 @@ client.on("messageCreate", async (message) => {
       );
       await sent.edit({ embeds: [noResultEmbed], components: [] });
 
-      // --- PATCH: LOG NOT FOUND TAGS ≤5 letters ---
       if (tagShouldBeLogged(tagQuery)) {
         const notFound = loadNotFoundTags();
         notFound[tagQuery] = (notFound[tagQuery] || 0) + 1;
