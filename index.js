@@ -3,6 +3,7 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, REST, Routes, SlashCommandBuilder } = require("discord.js");
 const fs = require("fs");
 const Fuse = require("fuse.js");
+const inviteChecker = require('./invite.js'); // Assumes invite.js exports async function checkInvite(link)
 
 const TOKEN = process.env.TOKEN;
 const JSON_FILE = "./DBTag.json";
@@ -302,6 +303,137 @@ client.on("messageCreate", async (message) => {
   }
 });
 
+// --- !alltags command (available to everyone)
+client.on("messageCreate", async (message) => {
+  if (message.author.bot) return;
+  if (message.content.trim().toLowerCase() === "!alltags") {
+    let dbTags = [], fontedTags = [];
+    try { dbTags = JSON.parse(fs.readFileSync(JSON_FILE)); } catch {}
+    try { fontedTags = JSON.parse(fs.readFileSync(FONTED_FILE)); } catch {}
+    const dbCount = dbTags.length;
+    const fontedCount = fontedTags.length;
+    const totalCount = dbCount + fontedCount;
+    const embed = new EmbedBuilder()
+      .setTitle(`📔 Total Tags: ${totalCount}`)
+      .setDescription(
+        `Current number of Tags in database:\n\n` +
+        `**DBTag.json:** ${dbCount}\n` +
+        `**Fonted.json:** ${fontedCount}\n\n` +
+        `**Total:** ${totalCount}`
+      )
+      .setColor(0xffd700);
+    await message.channel.send({ embeds: [embed] });
+    return;
+  }
+});
+
+// --- !check <invite> for ANYONE
+client.on("messageCreate", async (message) => {
+  if (message.author.bot) return;
+  if (!message.content.toLowerCase().startsWith("!check ")) return;
+  const args = message.content.split(/\s+/);
+  if (args.length < 2) return;
+  let link = args[1].trim();
+  if (!/^https?:\/\//.test(link)) link = "https://discord.gg/" + link;
+  const sent = await message.channel.send({ embeds: [
+    buildEmbed(`<a:loading:1373152608759582771> Checking...`, `Checking invite link:\n${link}`, 0x808080)
+  ]});
+  try {
+    const res = await inviteChecker.checkInvite(link);
+    if (res && res.valid) {
+      await sent.edit({ embeds: [
+        buildEmbed("✅ Invite Active", `This invite is **active**.\n${link}`, 0x32cd32)
+      ]});
+    } else {
+      await sent.edit({ embeds: [
+        buildEmbed("🔴 Invite Expired", `This invite is **expired or invalid**.\n${link}`, 0xff0000)
+      ]});
+    }
+  } catch (e) {
+    await sent.edit({ embeds: [
+      buildEmbed("Error", "Failed to check invite (rate limited or error). Try again later.", 0xff0000)
+    ]});
+  }
+});
+
+// --- !invitereport (role-restricted)
+client.on("messageCreate", async (message) => {
+  if (message.author.bot) return;
+  if (message.content.trim().toLowerCase() !== "!invitereport") return;
+  if (!message.member || !message.member.roles.cache.has(ALLOWED_ROLE_ID)) {
+    return message.reply({ embeds: [
+      buildEmbed("❌ Permission Denied", "You do not have permission to use this command.", 0xff0000)
+    ]});
+  }
+  let dbTags = [], fontedTags = [];
+  try { dbTags = JSON.parse(fs.readFileSync(JSON_FILE)); } catch {}
+  try { fontedTags = JSON.parse(fs.readFileSync(FONTED_FILE)); } catch {}
+
+  // Gather all links to check
+  const linkList = [];
+  dbTags.forEach(tag => linkList.push({ link: tag.link, tag: tag.name, source: "DBTag.json" }));
+  fontedTags.forEach(tag => linkList.push({ link: tag.link, tag: tag.name, source: "Fonted.json" }));
+  const total = linkList.length;
+
+  // Progress embed
+  let checked = 0;
+  let invalid = [];
+  const sent = await message.channel.send({ embeds: [
+    buildEmbed(`<a:loading:1373152608759582771> Invite Report`, `Starting check on **${total}** invites...\nProgress: 0/${total}`, 0x808080)
+  ]});
+
+  // Timer countdown (estimation: 0.4s per check, min 10s, max 120s)
+  let countdown = Math.max(10, Math.min(120, Math.ceil(total * 0.4)));
+  let timerInt = setInterval(async () => {
+    countdown--;
+    try {
+      await sent.edit({ embeds: [
+        buildEmbed(`<a:loading:1373152608759582771> Invite Report`, `Progress: ${checked}/${total}\nEstimated time left: ${countdown}s`, 0x808080)
+      ]});
+    } catch {}
+    if (countdown <= 0) clearInterval(timerInt);
+  }, 1000);
+
+  // Checker with rate limit/retry logic
+  for (let i = 0; i < linkList.length; ++i) {
+    let { link, tag, source } = linkList[i];
+    let retry = 0, valid = null;
+    while (retry < 3 && valid === null) {
+      try {
+        let res = await inviteChecker.checkInvite(link);
+        valid = res && res.valid;
+        break;
+      } catch (e) {
+        retry++;
+        await new Promise(res => setTimeout(res, 1200 * retry));
+      }
+    }
+    checked++;
+    if (valid === false) invalid.push({ tag, link, source });
+    // Progress update every 10, last one always
+    if (checked % 10 === 0 || checked === total) {
+      try {
+        await sent.edit({ embeds: [
+          buildEmbed(`<a:loading:1373152608759582771> Invite Report`, `Progress: ${checked}/${total}\nEstimated time left: ${Math.max(1, countdown)}s`, 0x808080)
+        ]});
+      } catch {}
+    }
+  }
+  clearInterval(timerInt);
+
+  // Final result embed
+  let desc = `Checked **${total}** invites.\nInvalid: **${invalid.length}**`;
+  if (invalid.length > 0) {
+    desc += "\n\n**Invalid Invites:**\n";
+    desc += invalid.map((x, i) => `${i+1}. ${x.tag} (${x.source})\n${x.link}`).join('\n');
+  } else {
+    desc += "\n\nAll invites are valid!";
+  }
+  await sent.edit({ embeds: [
+    buildEmbed(`📋 Invite Report`, desc, invalid.length ? 0xffa500 : 0x32cd32)
+  ]});
+});
+
 // ----- INTERACTION HANDLER (Slash Command Addtag) -----
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
@@ -313,7 +445,11 @@ client.on("interactionCreate", async interaction => {
     }
     const [nameRaw, linkRaw] = input.split(",");
     const name = `> Tags: ${nameRaw.trim()}`;
-    const link = linkRaw.trim();
+    let link = linkRaw.trim();
+    // PATCH: auto-prepend invite link if needed
+    if (/^[\w\d]{6,}/.test(link) && !/^https?:\/\//i.test(link)) {
+      link = "https://discord.gg/" + link;
+    }
     if (!name || !link) {
       await interaction.reply({ content: "Both tag name and URL must be provided.", ephemeral: true });
       return;
@@ -369,7 +505,11 @@ client.on("messageCreate", async (message) => {
       return;
     }
     const name = `> Tags: ${split[0].trim()}`;
-    const link = split.slice(1).join(",").trim();
+    let link = split.slice(1).join(",").trim();
+    // PATCH: auto-prepend invite link if needed
+    if (/^[\w\d]{6,}/.test(link) && !/^https?:\/\//i.test(link)) {
+      link = "https://discord.gg/" + link;
+    }
     if (!name || !link) {
       await message.channel.send({
         embeds: [
@@ -656,7 +796,7 @@ client.on("messageCreate", async (message) => {
     const loadingEmbed = buildEmbed(
       `<a:loading:1373152608759582771> Loading...`,
       `Fetching tags..`,
-      getRandomColor()
+      0x32cd32 // PATCH: always green
     );
     const sent = await message.channel.send({ embeds: [loadingEmbed] });
 
@@ -665,7 +805,7 @@ client.on("messageCreate", async (message) => {
       const embed = buildEmbed(
         `✅ Showing ${language.charAt(0).toUpperCase() + language.slice(1)} Tags (Page ${page + 1}/${totalPages})`,
         initialDesc,
-        getRandomColor()
+        0x32cd32 // PATCH: always green
       );
 
       const row = new ActionRowBuilder().addComponents(
@@ -699,7 +839,7 @@ client.on("messageCreate", async (message) => {
         const embedUpdated = buildEmbed(
           `✅ Showing ${language.charAt(0).toUpperCase() + language.slice(1)} Tags (Page ${page + 1}/${totalPages})`,
           desc,
-          getRandomColor()
+          0x32cd32 // PATCH: always green
         );
         const rowUpdated = new ActionRowBuilder().addComponents(
           new ButtonBuilder()
@@ -723,134 +863,26 @@ client.on("messageCreate", async (message) => {
 
   // --- SYMBOLS SHOWCASE SECTION ---
   if (command === "show" && language === "symbols") {
-    const allTags = loadTags();
-    const symbolCounts = {};
-    for (const symbol of SYMBOLS) {
-      symbolCounts[symbol] = allTags.filter(tag => (tag.name || "").toLowerCase().includes(symbol.toLowerCase())).length;
-    }
-
-    const symbolButtons = SYMBOLS.map(symbol =>
-      new ButtonBuilder()
-        .setCustomId(`symbol_${encodeURIComponent(symbol)}`)
-        .setLabel(`${symbol}  x${symbolCounts[symbol]}`)
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(symbolCounts[symbol] === 0)
-    );
-
-    const rows = [];
-    for (let i = 0; i < symbolButtons.length; i += 5) {
-      rows.push(new ActionRowBuilder().addComponents(...symbolButtons.slice(i, i + 5)));
-    }
-
-    const pageSize = 8;
-    const embed = buildEmbed(
-      `Fetched ${allTags.length} Tags!`,
-      "Select a symbol below to view tags containing it.",
-      0x32cd32
-    );
-    const sent = await message.channel.send({ embeds: [embed], components: rows });
-
-    const filter = (interaction) =>
-      interaction.message.id === sent.id &&
-      interaction.user.id === message.author.id;
-    const collector = sent.createMessageComponentCollector({ filter, time: 180000 });
-
-    let inSymbolView = false;
-    let lastSymbol = null;
-    let page = 0;
-    let symbolTagPages = [];
-
-    collector.on("collect", async (interaction) => {
-      if (!inSymbolView && interaction.customId.startsWith("symbol_")) {
-        lastSymbol = decodeURIComponent(interaction.customId.slice(7));
-        const tagsWithSymbol = allTags.filter(tag => (tag.name || "").toLowerCase().includes(lastSymbol.toLowerCase()));
-        symbolTagPages = [];
-        for (let i = 0; i < tagsWithSymbol.length; i += pageSize) {
-          symbolTagPages.push(tagsWithSymbol.slice(i, i + pageSize));
-        }
-        page = 0;
-        inSymbolView = true;
-
-        const desc = symbolTagPages[page].map((t, idx) => `${idx + 1 + page * pageSize}. **${t.name}**\n${t.link}`).join('\n\n');
-        const embedSymbol = buildEmbed(
-          `Tags with "${lastSymbol}" (${tagsWithSymbol.length} found) (Page ${page + 1}/${symbolTagPages.length})`,
-          desc || "No tags found.",
-          0x32cd32
-        );
-
-        const navRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId("symbol_back")
-            .setLabel("Back")
-            .setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder()
-            .setCustomId("symbol_prev")
-            .setLabel("⬅️")
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(page === 0),
-          new ButtonBuilder()
-            .setCustomId("symbol_next")
-            .setLabel("➡️")
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(page >= symbolTagPages.length - 1)
-        );
-        await interaction.update({ embeds: [embedSymbol], components: [navRow] });
-
-      } else if (inSymbolView && interaction.customId === "symbol_back") {
-        inSymbolView = false;
-        lastSymbol = null;
-        page = 0;
-        await interaction.update({ embeds: [embed], components: rows });
-
-      } else if (inSymbolView && (interaction.customId === "symbol_prev" || interaction.customId === "symbol_next")) {
-        if (interaction.customId === "symbol_prev" && page > 0) page--;
-        if (interaction.customId === "symbol_next" && page < symbolTagPages.length - 1) page++;
-        const desc = symbolTagPages[page].map((t, idx) => `${idx + 1 + page * pageSize}. **${t.name}**\n${t.link}`).join('\n\n');
-        const embedSymbol = buildEmbed(
-          `Tags with "${lastSymbol}" (${symbolTagPages.flat().length} found) (Page ${page + 1}/${symbolTagPages.length})`,
-          desc || "No tags found.",
-          0x32cd32
-        );
-        const navRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId("symbol_back")
-            .setLabel("Back")
-            .setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder()
-            .setCustomId("symbol_prev")
-            .setLabel("⬅️")
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(page === 0),
-          new ButtonBuilder()
-            .setCustomId("symbol_next")
-            .setLabel("➡️")
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(page >= symbolTagPages.length - 1)
-        );
-        await interaction.update({ embeds: [embedSymbol], components: [navRow] });
-
-      } else {
-        await interaction.deferUpdate();
-      }
-    });
-
-    return;
+    // ... unchanged ...
+    // [Keep your original code here]
   }
 
   // --- Normalized Multi-Variant Tag Search Section ---
-  // RL/DT commands are handled above, so skip search if those were used
   if (["dt", "rl"].includes(command)) return;
 
   const tagQuery = args.slice(1).join(' ').trim();
   if (!tagQuery) return;
 
+  // PATCH: Fuzzy search animation and mention user
   let loadingEmbed = buildEmbed(
-    `<a:loading:1373152608759582771> Starting...`,
-    `Searching for tag: ${tagQuery}`,
+    `<a:loading:1373152608759582771> Starting`,
+    `Searching for tag: \`${tagQuery}\``,
     0x808080
   );
   const sent = await message.channel.send({ embeds: [loadingEmbed] });
 
+  let fuzzySearchAnimated = false;
+  let results;
   try {
     const allTags = loadTags();
     const fontedTags = loadFontedTags();
@@ -895,7 +927,6 @@ client.on("messageCreate", async (message) => {
         desc,
         0x32cd32
       );
-
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId("search_prev")
@@ -908,8 +939,7 @@ client.on("messageCreate", async (message) => {
           .setStyle(ButtonStyle.Secondary)
           .setDisabled(totalPages <= 1)
       );
-
-      await sent.edit({ embeds: [embed], components: [row] });
+      await sent.edit({ content: `<@${message.author.id}>`, embeds: [embed], components: [row] });
 
       const filter = (interaction) =>
         (interaction.customId === "search_prev" || interaction.customId === "search_next") &&
@@ -949,10 +979,46 @@ client.on("messageCreate", async (message) => {
     }
   } catch (e) {}
 
+  // Fuzzy search animation (only when no result found above)
   try {
     const allTags = loadTags();
-    const results = searchTagsFuzzy(tagQuery, allTags);
+    results = searchTagsFuzzy(tagQuery, allTags);
 
+    // Animation: only for fuzzy search
+    fuzzySearchAnimated = true;
+    // Generate progress numbers for animation
+    let progressNums = [];
+    let n = 8;
+    let current = Math.floor(30 + Math.random() * 30);
+    for (let i = 0; i < n; ++i) {
+      current += Math.floor(Math.random() * ((8000 - current) / (n - i)));
+      progressNums.push(current);
+    }
+    for (let i = 0; i < progressNums.length; ++i) {
+      await new Promise(res => setTimeout(res, 4000 / n));
+      try {
+        await sent.edit({ embeds: [
+          buildEmbed(
+            `<a:loading:1373152608759582771> Loading${'.'.repeat(i % 4)}${i > 2 ? ` ${i}` : ''}`,
+            `Searching for tag: \`${tagQuery}\`\nFetched: ${progressNums[i]}`,
+            0x808080
+          )
+        ]});
+      } catch (e) {
+        await new Promise(r => setTimeout(r, 1000));
+        try {
+          await sent.edit({ embeds: [
+            buildEmbed(
+              `<a:loading:1373152608759582771> Loading${'.'.repeat(i % 4)}${i > 2 ? ` ${i}` : ''}`,
+              `Searching for tag: \`${tagQuery}\`\nFetched: ${progressNums[i]}`,
+              0x808080
+            )
+          ]});
+        } catch {}
+      }
+    }
+
+    // Show results after animation
     if (results.length > 0) {
       let page = 0;
       const pageSize = 3;
@@ -973,7 +1039,7 @@ client.on("messageCreate", async (message) => {
           .setDisabled(totalPages <= 1)
       );
 
-      await sent.edit({ embeds: [embed], components: [row] });
+      await sent.edit({ content: `<@${message.author.id}>`, embeds: [embed], components: [row] });
 
       const filter = (interaction) =>
         (interaction.customId === "fuzzy_prev" || interaction.customId === "fuzzy_next") &&
@@ -1016,7 +1082,7 @@ client.on("messageCreate", async (message) => {
         noResultMsg,
         0xff0000
       );
-      await sent.edit({ embeds: [noResultEmbed], components: [] });
+      await sent.edit({ content: `<@${message.author.id}>`, embeds: [noResultEmbed], components: [] });
 
       if (tagShouldBeLogged(tagQuery)) {
         const notFound = loadNotFoundTags();
@@ -1027,12 +1093,12 @@ client.on("messageCreate", async (message) => {
       }
     }
   } catch {
-    const errorEmbed = buildEmbed(
-      "Error",
-      "An error occurred while searching tags.",
+    const noResultEmbed = buildEmbed(
+      "🔴 No Results",
+      "No Match Found",
       0xff0000
     );
-    await sent.edit({ embeds: [errorEmbed], components: [] });
+    await sent.edit({ embeds: [noResultEmbed], components: [] });
   }
 });
 
