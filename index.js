@@ -1,3 +1,18 @@
+function splitEmbedDescription(desc, maxLen = 4096) {
+  const lines = desc.split('\n');
+  const chunks = [];
+  let current = '';
+  for (const line of lines) {
+    // If adding this line would exceed the limit, start a new chunk
+    if ((current + line + '\n').length > maxLen) {
+      chunks.push(current);
+      current = '';
+    }
+    current += line + '\n';
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
 const normalizer = require('./fontNormalizer');
 require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, REST, Routes, SlashCommandBuilder } = require("discord.js");
@@ -355,8 +370,7 @@ client.on("messageCreate", async (message) => {
     ]});
   }
 });
-
-// --- !invitereport (role-restricted)
+// --- !invitereport (role-restricted, fast concurrent version!)
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
   if (message.content.trim().toLowerCase() !== "!invitereport") return;
@@ -382,58 +396,96 @@ client.on("messageCreate", async (message) => {
     buildEmbed(`<a:loading:1373152608759582771> Invite Report`, `Starting check on **${total}** invites...\nProgress: 0/${total}`, 0x808080)
   ]});
 
-  // Timer countdown (estimation: 0.4s per check, min 10s, max 120s)
-  let countdown = Math.max(10, Math.min(120, Math.ceil(total * 0.4)));
-  let timerInt = setInterval(async () => {
-    countdown--;
-    try {
-      await sent.edit({ embeds: [
-        buildEmbed(`<a:loading:1373152608759582771> Invite Report`, `Progress: ${checked}/${total}\nEstimated time left: ${countdown}s`, 0x808080)
-      ]});
-    } catch {}
-    if (countdown <= 0) clearInterval(timerInt);
-  }, 1000);
+  // --- concurrency helper ---
+  async function processWithConcurrency(tasks, worker, concurrency = 20, progressCb) {
+    let idx = 0, running = 0, finished = 0;
+    let results = new Array(tasks.length);
+    let startTime = Date.now();
+    return new Promise((resolve) => {
+      function next() {
+        while (running < concurrency && idx < tasks.length) {
+          const thisIdx = idx++;
+          running++;
+          worker(tasks[thisIdx], thisIdx)
+            .then(result => {
+              results[thisIdx] = result;
+              finished++;
+              running--;
+              if (progressCb) {
+                const elapsed = (Date.now() - startTime) / 1000;
+                const rate = finished / (elapsed || 1e-6);
+                const estLeft = Math.max(1, Math.round((tasks.length - finished) / (rate || 1)));
+                progressCb(finished, tasks.length, estLeft);
+              }
+              next();
+            });
+        }
+        if (idx >= tasks.length && running === 0) resolve(results);
+      }
+      next();
+    });
+  }
 
-  // Checker with rate limit/retry logic
-  for (let i = 0; i < linkList.length; ++i) {
-    let { link, tag, source } = linkList[i];
-    let retry = 0, valid = null;
-    while (retry < 3 && valid === null) {
-      try {
-        let res = await inviteChecker.checkInvite(link);
-        valid = res && res.valid;
-        break;
-      } catch (e) {
+  // --- Main concurrent check ---
+  let lastProgress = 0;
+  await processWithConcurrency(
+    linkList,
+    async (item, i) => {
+      let retry = 0, valid = null;
+      while (retry < 2 && valid === null) {
+        try {
+          let res = await inviteChecker.checkInvite(item.link);
+          valid = res && res.valid;
+        } catch {
+          valid = null;
+          await new Promise(res => setTimeout(res, 800 * (retry + 1)));
+        }
         retry++;
-        await new Promise(res => setTimeout(res, 1200 * retry));
+      }
+      return { ...item, valid };
+    },
+    20, // concurrency limit: safe for Discord API, tune if needed
+    async (checkedCount, totalCount, etaSec) => {
+      // update progress every 10 or last
+      if (checkedCount % 10 === 0 || checkedCount === totalCount) {
+        if (checkedCount !== lastProgress) {
+          lastProgress = checkedCount;
+          try {
+            await sent.edit({ embeds: [
+              buildEmbed(
+                `<a:loading:1373152608759582771> Invite Report`,
+                `Progress: ${checkedCount}/${totalCount}\nEstimated time left: ${etaSec}s`,
+                0x808080
+              )
+            ]});
+          } catch {}
+        }
       }
     }
-    checked++;
-    if (valid === false) invalid.push({ tag, link, source });
-    // Progress update every 10, last one always
-    if (checked % 10 === 0 || checked === total) {
-      try {
-        await sent.edit({ embeds: [
-          buildEmbed(`<a:loading:1373152608759582771> Invite Report`, `Progress: ${checked}/${total}\nEstimated time left: ${Math.max(1, countdown)}s`, 0x808080)
-        ]});
-      } catch {}
-    }
-  }
-  clearInterval(timerInt);
+  ).then(results => {
+    checked = results.length;
+    invalid = results.filter(r => r.valid === false);
+  });
+// Final result embed
+let desc = `Checked **${total}** invites.\nInvalid: **${invalid.length}**`;
+if (invalid.length > 0) {
+  desc += "\n\n**Invalid Invites:**\n";
+  desc += invalid.map((x, i) => `${i+1}. ${x.tag} (${x.source})\n${x.link}`).join('\n');
+} else {
+  desc += "\n\nAll invites are valid!";
+}
 
-  // Final result embed
-  let desc = `Checked **${total}** invites.\nInvalid: **${invalid.length}**`;
-  if (invalid.length > 0) {
-    desc += "\n\n**Invalid Invites:**\n";
-    desc += invalid.map((x, i) => `${i+1}. ${x.tag} (${x.source})\n${x.link}`).join('\n');
-  } else {
-    desc += "\n\nAll invites are valid!";
-  }
-  await sent.edit({ embeds: [
-    buildEmbed(`📋 Invite Report`, desc, invalid.length ? 0xffa500 : 0x32cd32)
-  ]});
+// Split the description if too long
+const descChunks = splitEmbedDescription(desc);
+
+// Send the first chunk as an edit to the original message
+await sent.edit({ embeds: [buildEmbed(`📋 Invite Report`, descChunks[0], invalid.length ? 0xffa500 : 0x32cd32)] });
+
+// If there are more, send them as follow up embeds
+for (let i = 1; i < descChunks.length; ++i) {
+  await message.channel.send({ embeds: [buildEmbed(`📋 Invite Report (cont.)`, descChunks[i], 0xffa500)] });
+}                           
 });
-
 // ----- INTERACTION HANDLER (Slash Command Addtag) -----
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
